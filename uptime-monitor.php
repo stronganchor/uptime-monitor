@@ -3,7 +3,7 @@
 Plugin Name: Uptime Monitor
 Plugin URI: https://github.com/stronganchor/uptime-monitor/
 Description: A plugin to monitor URLs and report their HTTP status.
-Version: 1.0.3
+Version: 1.0.4
 Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
 */
@@ -93,19 +93,21 @@ function uptime_monitor_page() {
 
     echo '<h2>Sites to Monitor</h2>';
     echo '<table class="widefat">';
-    echo '<thead><tr><th>URL</th><th>Status Code</th><th>Keyword Match</th><th>Custom Keyword</th></tr></thead>';
+    echo '<thead><tr><th>URL</th><th>Site Title</th><th>Site Status</th><th>Keyword Match</th><th>Custom Keyword</th></tr></thead>';
     echo '<tbody>';
 
     foreach ($sites as $site) {
         $status = isset($results[$site]['status']) ? $results[$site]['status'] : 'N/A';
         $keyword_match = isset($results[$site]['keyword_match']) ? $results[$site]['keyword_match'] : 'N/A';
         $custom_keyword = isset($keywords[$site]) ? $keywords[$site] : '';
+        $site_title = isset($results[$site]['site_title']) ? $results[$site]['site_title'] : 'N/A';
 
         $status_class = (strpos($status, 'Error') !== false) ? 'error' : '';
         $keyword_class = ($keyword_match === 'No match found') ? 'error' : '';
 
         echo '<tr>';
         echo '<td><a href="' . esc_url($site) . '" target="_blank">' . esc_html($site) . '</a></td>';
+        echo '<td>' . esc_html($site_title) . '</td>';
         echo '<td class="' . $status_class . '">' . esc_html($status) . '</td>';
         echo '<td class="' . $keyword_class . '">' . esc_html($keyword_match) . '</td>';
         echo '<td>';
@@ -158,13 +160,23 @@ function uptime_monitor_check_status($url) {
         $error_message = $response->get_error_message();
         return array(
             'status' => "Error: $error_message",
-            'keyword_match' => 'N/A'
+            'keyword_match' => 'N/A',
+            'site_title' => 'N/A'
         );
     } else {
         $status_code = wp_remote_retrieve_response_code($response);
         $status_message = wp_remote_retrieve_response_message($response);
         
+        $ssl_valid = uptime_monitor_check_ssl($url);
+        $status = ($status_code === 200 && $ssl_valid) ? "OK ($status_code)" : "Error ($status_code): $status_message";
+        
+        if (!$ssl_valid) {
+            $status .= " - SSL Certificate Error";
+        }
+        
         $keyword_match = 'No match found';
+        $site_title = 'N/A';
+        
         if ($status_code === 200) {
             $page_content = wp_remote_retrieve_body($response);
             
@@ -195,11 +207,17 @@ function uptime_monitor_check_status($url) {
                     $keyword_match = $matches[0];
                 }
             }
+            
+            // Extract the site title from the HTML content
+            if (preg_match('/<title>(.*?)<\/title>/i', $page_content, $matches)) {
+                $site_title = $matches[1];
+            }
         }
         
         return array(
-            'status' => ($status_code === 200) ? "OK ($status_code)" : "Error ($status_code): $status_message",
-            'keyword_match' => $keyword_match
+            'status' => $status,
+            'keyword_match' => $keyword_match,
+            'site_title' => $site_title
         );
     }
 }
@@ -224,6 +242,29 @@ function extract_visible_text($html) {
     }
 
     return $visible_text;
+}
+
+function uptime_monitor_check_ssl($url) {
+    $parsed_url = parse_url($url);
+    $host = $parsed_url['host'];
+    $port = isset($parsed_url['port']) ? $parsed_url['port'] : 443;
+    
+    $context = stream_context_create([
+        'ssl' => [
+            'verify_peer' => true,
+            'verify_peer_name' => true,
+            'peer_name' => $host
+        ]
+    ]);
+    
+    $stream = @stream_socket_client("ssl://$host:$port", $errno, $errstr, 30, STREAM_CLIENT_CONNECT, $context);
+    
+    if ($stream === false) {
+        return false;
+    } else {
+        fclose($stream);
+        return true;
+    }
 }
 
 function uptime_monitor_schedule_task() {
