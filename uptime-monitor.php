@@ -19,7 +19,6 @@ function uptime_monitor_menu() {
     );
 }
 add_action('admin_menu', 'uptime_monitor_menu');
-
 function uptime_monitor_page() {
     if (isset($_POST['check_all_sites'])) {
         $sites = uptime_monitor_get_mainwp_sites();
@@ -29,6 +28,27 @@ function uptime_monitor_page() {
     }
 
     $sites = uptime_monitor_get_mainwp_sites();
+    $results = get_option('uptime_monitor_results', array());
+
+    // Sort the sites based on status code and keyword match
+    usort($sites, function($a, $b) use ($results) {
+        $status_a = isset($results[$a]['status']) ? $results[$a]['status'] : 'N/A';
+        $status_b = isset($results[$b]['status']) ? $results[$b]['status'] : 'N/A';
+        $keyword_a = isset($results[$a]['keyword_match']) ? $results[$a]['keyword_match'] : 'N/A';
+        $keyword_b = isset($results[$b]['keyword_match']) ? $results[$b]['keyword_match'] : 'N/A';
+
+        if (strpos($status_a, 'Error') !== false && strpos($status_b, 'Error') === false) {
+            return -1;
+        } elseif (strpos($status_a, 'Error') === false && strpos($status_b, 'Error') !== false) {
+            return 1;
+        } elseif ($keyword_a === 'No match found' && $keyword_b !== 'No match found') {
+            return -1;
+        } elseif ($keyword_a !== 'No match found' && $keyword_b === 'No match found') {
+            return 1;
+        } else {
+            return strcasecmp($a, $b);
+        }
+    });
 
     echo '<div class="wrap">';
     echo '<h1>Uptime Monitor</h1>';
@@ -42,16 +62,17 @@ function uptime_monitor_page() {
     echo '<thead><tr><th>URL</th><th>Status Code</th><th>Keyword Match</th></tr></thead>';
     echo '<tbody>';
 
-    $results = get_option('uptime_monitor_results', array());
-
     foreach ($sites as $site) {
         $status = isset($results[$site]['status']) ? $results[$site]['status'] : 'N/A';
         $keyword_match = isset($results[$site]['keyword_match']) ? $results[$site]['keyword_match'] : 'N/A';
 
+        $status_class = (strpos($status, 'Error') !== false) ? 'error' : '';
+        $keyword_class = ($keyword_match === 'No match found') ? 'error' : '';
+
         echo '<tr>';
         echo '<td>' . esc_url($site) . '</td>';
-        echo '<td>' . esc_html($status) . '</td>';
-        echo '<td>' . esc_html($keyword_match) . '</td>';
+        echo '<td class="' . $status_class . '">' . esc_html($status) . '</td>';
+        echo '<td class="' . $keyword_class . '">' . esc_html($keyword_match) . '</td>';
         echo '</tr>';
     }
 
@@ -60,6 +81,16 @@ function uptime_monitor_page() {
 
     echo '</div>';
 }
+
+function uptime_monitor_enqueue_styles() {
+    echo '<style>
+        .error {
+            color: red !important;
+            font-weight: bold;
+        }
+    </style>';
+}
+add_action('admin_head', 'uptime_monitor_enqueue_styles');
 
 function uptime_monitor_get_mainwp_sites() {
     global $wpdb;
