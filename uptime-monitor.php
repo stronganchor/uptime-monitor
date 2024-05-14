@@ -3,7 +3,7 @@
 Plugin Name: Uptime Monitor
 Plugin URI: https://github.com/stronganchor/uptime-monitor/
 Description: A plugin to monitor URLs and report their HTTP status.
-Version: 1.0.1
+Version: 1.0.2
 Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
 */
@@ -35,6 +35,9 @@ function uptime_monitor_page() {
         $keywords = get_option('uptime_monitor_keywords', array());
         $keywords[$site] = $keyword;
         update_option('uptime_monitor_keywords', $keywords);
+        
+        // Perform an immediate check for the site with the updated keyword
+        uptime_monitor_perform_check($site);
     }
 
     $sites = uptime_monitor_get_mainwp_sites();
@@ -209,6 +212,14 @@ function uptime_monitor_schedule_task() {
     }
 }
 add_action('init', 'uptime_monitor_schedule_task');
+
+function uptime_monitor_perform_hourly_check() {
+    $sites = uptime_monitor_get_mainwp_sites();
+    foreach ($sites as $site) {
+        uptime_monitor_perform_check($site);
+    }
+}
+add_action('uptime_monitor_hourly_check', 'uptime_monitor_perform_hourly_check');
 
 function uptime_monitor_perform_check($site) {
     $result = uptime_monitor_check_status($site);
