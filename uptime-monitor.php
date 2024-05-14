@@ -3,7 +3,7 @@
 Plugin Name: Uptime Monitor
 Plugin URI: https://github.com/stronganchor/uptime-monitor/
 Description: A plugin to monitor URLs and report their HTTP status.
-Version: 1.0.0
+Version: 1.0.1
 Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
 */
@@ -19,7 +19,9 @@ function uptime_monitor_menu() {
     );
 }
 add_action('admin_menu', 'uptime_monitor_menu');
+
 function uptime_monitor_page() {
+    
     if (isset($_POST['check_all_sites'])) {
         $sites = uptime_monitor_get_mainwp_sites();
         foreach ($sites as $site) {
@@ -27,8 +29,17 @@ function uptime_monitor_page() {
         }
     }
 
+    if (isset($_POST['update_keyword'])) {
+        $site = sanitize_text_field($_POST['site']);
+        $keyword = sanitize_text_field($_POST['keyword']);
+        $keywords = get_option('uptime_monitor_keywords', array());
+        $keywords[$site] = $keyword;
+        update_option('uptime_monitor_keywords', $keywords);
+    }
+
     $sites = uptime_monitor_get_mainwp_sites();
     $results = get_option('uptime_monitor_results', array());
+    $keywords = get_option('uptime_monitor_keywords', array());
 
     // Sort the sites based on status code and keyword match
     usort($sites, function($a, $b) use ($results) {
@@ -59,20 +70,28 @@ function uptime_monitor_page() {
 
     echo '<h2>Sites to Monitor</h2>';
     echo '<table class="widefat">';
-    echo '<thead><tr><th>URL</th><th>Status Code</th><th>Keyword Match</th></tr></thead>';
+    echo '<thead><tr><th>URL</th><th>Status Code</th><th>Keyword Match</th><th>Custom Keyword</th></tr></thead>';
     echo '<tbody>';
 
     foreach ($sites as $site) {
         $status = isset($results[$site]['status']) ? $results[$site]['status'] : 'N/A';
         $keyword_match = isset($results[$site]['keyword_match']) ? $results[$site]['keyword_match'] : 'N/A';
+        $custom_keyword = isset($keywords[$site]) ? $keywords[$site] : '';
 
         $status_class = (strpos($status, 'Error') !== false) ? 'error' : '';
         $keyword_class = ($keyword_match === 'No match found') ? 'error' : '';
 
         echo '<tr>';
-        echo '<td>' . esc_url($site) . '</td>';
+        echo '<td><a href="' . esc_url($site) . '" target="_blank">' . esc_html($site) . '</a></td>';
         echo '<td class="' . $status_class . '">' . esc_html($status) . '</td>';
         echo '<td class="' . $keyword_class . '">' . esc_html($keyword_match) . '</td>';
+        echo '<td>';
+        echo '<form method="post" style="display: inline;">';
+        echo '<input type="hidden" name="site" value="' . esc_attr($site) . '">';
+        echo '<input type="text" name="keyword" value="' . esc_attr($custom_keyword) . '">';
+        echo '<input type="submit" name="update_keyword" class="button button-secondary" value="Update">';
+        echo '</form>';
+        echo '</td>';
         echo '</tr>';
     }
 
@@ -129,18 +148,29 @@ function uptime_monitor_check_status($url) {
             // Extract visible text from the HTML content
             $visible_text = extract_visible_text($page_content);
             
-            // Extract the base domain name from the URL
-            $domain = parse_url($url, PHP_URL_HOST);
-            $base_domain = preg_replace('/^www\./', '', $domain);
-            $base_domain = preg_replace('/\.[^.]+$/', '', $base_domain);
-            
-            // Convert the base domain name to a regex pattern
-            $pattern = str_split($base_domain);
-            $pattern = implode('\s*', $pattern);
-            
-            // Search for the pattern in the visible text (case-insensitive)
-            if (preg_match("/{$pattern}/i", $visible_text, $matches)) {
-                $keyword_match = $matches[0];
+            // Get the custom keyword for the site, if available
+            $keywords = get_option('uptime_monitor_keywords', array());
+            $custom_keyword = isset($keywords[$url]) ? $keywords[$url] : '';
+
+            if (!empty($custom_keyword)) {
+                // Search for the custom keyword in the visible text (case-insensitive)
+                if (preg_match("/{$custom_keyword}/i", $visible_text, $matches)) {
+                    $keyword_match = $matches[0];
+                }
+            } else {
+                // Extract the base domain name from the URL
+                $domain = parse_url($url, PHP_URL_HOST);
+                $base_domain = preg_replace('/^www\./', '', $domain);
+                $base_domain = preg_replace('/\.[^.]+$/', '', $base_domain);
+                
+                // Convert the base domain name to a regex pattern
+                $pattern = str_split($base_domain);
+                $pattern = implode('\s*', $pattern);
+                
+                // Search for the pattern in the visible text (case-insensitive)
+                if (preg_match("/{$pattern}/i", $visible_text, $matches)) {
+                    $keyword_match = $matches[0];
+                }
             }
         }
         
