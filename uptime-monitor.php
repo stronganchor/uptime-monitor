@@ -3,7 +3,7 @@
 Plugin Name: Uptime Monitor
 Plugin URI: https://github.com/stronganchor/uptime-monitor/
 Description: A plugin to monitor URLs and report their HTTP status.
-Version: 1.0.2
+Version: 1.0.3
 Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
 */
@@ -24,8 +24,19 @@ function uptime_monitor_page() {
     
     if (isset($_POST['check_all_sites'])) {
         $sites = uptime_monitor_get_mainwp_sites();
+        $failed_sites = array();
+        
         foreach ($sites as $site) {
             uptime_monitor_perform_check($site);
+            $result = uptime_monitor_check_status($site);
+            
+            if (strpos($result['status'], 'Error') !== false || $result['keyword_match'] === 'No match found') {
+                $failed_sites[$site] = $result['status'] . ' - ' . $result['keyword_match'];
+            }
+        }
+        
+        if (!empty($failed_sites)) {
+            uptime_monitor_send_notification($failed_sites);
         }
     }
 
@@ -38,6 +49,15 @@ function uptime_monitor_page() {
         
         // Perform an immediate check for the site with the updated keyword
         uptime_monitor_perform_check($site);
+        
+        // Check if the site fails the checks after updating the keyword
+        $result = uptime_monitor_check_status($site);
+        if (strpos($result['status'], 'Error') !== false || $result['keyword_match'] === 'No match found') {
+            $failed_sites = array(
+                $site => $result['status'] . ' - ' . $result['keyword_match']
+            );
+            uptime_monitor_send_notification($failed_sites);
+        }
     }
 
     $sites = uptime_monitor_get_mainwp_sites();
@@ -215,8 +235,19 @@ add_action('init', 'uptime_monitor_schedule_task');
 
 function uptime_monitor_perform_hourly_check() {
     $sites = uptime_monitor_get_mainwp_sites();
+    $failed_sites = array();
+    
     foreach ($sites as $site) {
         uptime_monitor_perform_check($site);
+        $result = uptime_monitor_check_status($site);
+        
+        if (strpos($result['status'], 'Error') !== false || $result['keyword_match'] === 'No match found') {
+            $failed_sites[$site] = $result['status'] . ' - ' . $result['keyword_match'];
+        }
+    }
+    
+    if (!empty($failed_sites)) {
+        uptime_monitor_send_notification($failed_sites);
     }
 }
 add_action('uptime_monitor_hourly_check', 'uptime_monitor_perform_hourly_check');
@@ -228,3 +259,31 @@ function uptime_monitor_perform_check($site) {
     update_option('uptime_monitor_results', $results);
 }
 add_action('uptime_monitor_hourly_check', 'uptime_monitor_perform_check');
+
+function uptime_monitor_send_notification($failed_sites) {
+    $admin_email = get_option('admin_email');
+    $site_url = get_site_url();
+    $from_email = 'noreply@' . parse_url($site_url, PHP_URL_HOST);
+    
+    $num_failed_sites = count($failed_sites);
+    $subject = 'Uptime Monitor: ' . $num_failed_sites . ' Site' . ($num_failed_sites > 1 ? 's' : '') . ' Failed';
+    
+    $message = "The following site" . ($num_failed_sites > 1 ? 's' : '') . " failed the uptime monitoring check:\n\n";
+    
+    foreach ($failed_sites as $site => $error) {
+        $error_parts = explode(' - ', $error);
+        $status = $error_parts[0];
+        $keyword = $error_parts[1];
+        
+        $message .= "Site: $site\n";
+        $message .= "Site Status: $status\n";
+        $message .= "Keyword: $keyword\n\n";
+    }
+    
+    $headers = array(
+        'From: Uptime Monitor <' . $from_email . '>',
+        'Content-Type: text/plain; charset=UTF-8'
+    );
+    
+    wp_mail($admin_email, $subject, $message, $headers);
+}
