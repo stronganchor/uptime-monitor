@@ -3,7 +3,7 @@
 Plugin Name: Uptime Monitor
 Plugin URI: https://github.com/stronganchor/uptime-monitor/
 Description: A plugin to monitor URLs and report their HTTP status.
-Version: 1.0.4
+Version: 1.0.5
 Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
 */
@@ -60,10 +60,15 @@ function uptime_monitor_page() {
         }
     }
 
+    if (isset($_POST['recheck_site'])) {
+        $site = sanitize_text_field($_POST['site']);
+        uptime_monitor_perform_check($site);
+    }
+
     $sites = uptime_monitor_get_mainwp_sites();
     $results = get_option('uptime_monitor_results', array());
     $keywords = get_option('uptime_monitor_keywords', array());
-
+    
     // Sort the sites based on status code and keyword match
     usort($sites, function($a, $b) use ($results) {
         $status_a = isset($results[$a]['status']) ? $results[$a]['status'] : 'N/A';
@@ -93,7 +98,7 @@ function uptime_monitor_page() {
 
     echo '<h2>Sites to Monitor</h2>';
     echo '<table class="widefat">';
-    echo '<thead><tr><th>URL</th><th>Site Title</th><th>Site Status</th><th>Keyword Match</th><th>Custom Keyword</th></tr></thead>';
+    echo '<thead><tr><th>URL</th><th>Site Title</th><th>Site Status</th><th>Keyword Match</th><th>Custom Keyword</th><th>Action</th></tr></thead>';
     echo '<tbody>';
 
     foreach ($sites as $site) {
@@ -115,6 +120,12 @@ function uptime_monitor_page() {
         echo '<input type="hidden" name="site" value="' . esc_attr($site) . '">';
         echo '<input type="text" name="keyword" value="' . esc_attr($custom_keyword) . '">';
         echo '<input type="submit" name="update_keyword" class="button button-secondary" value="Update">';
+        echo '</form>';
+        echo '</td>';
+        echo '<td>';
+        echo '<form method="post" style="display: inline;">';
+        echo '<input type="hidden" name="site" value="' . esc_attr($site) . '">';
+        echo '<input type="submit" name="recheck_site" class="button button-secondary" value="Recheck">';
         echo '</form>';
         echo '</td>';
         echo '</tr>';
@@ -153,73 +164,90 @@ function uptime_monitor_get_mainwp_sites() {
     return $mainwp_sites;
 }
 
-function uptime_monitor_check_status($url) {
-    $response = wp_remote_get($url);
+function uptime_monitor_check_status($url, $retry_count = 3, $retry_delay = 5) {
+    $args = array(
+        'timeout' => 15,
+    );
     
-    if (is_wp_error($response)) {
-        $error_message = $response->get_error_message();
-        return array(
-            'status' => "Error: $error_message",
-            'keyword_match' => 'N/A',
-            'site_title' => 'N/A'
-        );
-    } else {
-        $status_code = wp_remote_retrieve_response_code($response);
-        $status_message = wp_remote_retrieve_response_message($response);
+    for ($i = 0; $i < $retry_count; $i++) {
+        $response = wp_remote_get($url, $args);
         
-        $ssl_valid = uptime_monitor_check_ssl($url);
-        $status = ($status_code === 200 && $ssl_valid) ? "OK ($status_code)" : "Error ($status_code): $status_message";
-        
-        if (!$ssl_valid) {
-            $status .= " - SSL Certificate Error";
-        }
-        
-        $keyword_match = 'No match found';
-        $site_title = 'N/A';
-        
-        if ($status_code === 200) {
-            $page_content = wp_remote_retrieve_body($response);
+        if (is_wp_error($response)) {
+            $error_message = $response->get_error_message();
+            $status = "Error: $error_message";
+            $keyword_match = 'N/A';
+            $site_title = 'N/A';
+        } else {
+            $status_code = wp_remote_retrieve_response_code($response);
+            $status_message = wp_remote_retrieve_response_message($response);
             
-            // Extract visible text from the HTML content
-            $visible_text = extract_visible_text($page_content);
+            $ssl_valid = uptime_monitor_check_ssl($url);
+            $status = ($status_code === 200 && $ssl_valid) ? "OK ($status_code)" : "Error ($status_code): $status_message";
             
-            // Get the custom keyword for the site, if available
-            $keywords = get_option('uptime_monitor_keywords', array());
-            $custom_keyword = isset($keywords[$url]) ? $keywords[$url] : '';
+            if (!$ssl_valid) {
+                $status .= " - SSL Certificate Error";
+            }
+            
+            $keyword_match = 'No match found';
+            $site_title = 'N/A';
+            
+            if ($status_code === 200) {
+                $page_content = wp_remote_retrieve_body($response);
+                
+                // Extract visible text from the HTML content
+                $visible_text = extract_visible_text($page_content);
+                
+                // Get the custom keyword for the site, if available
+                $keywords = get_option('uptime_monitor_keywords', array());
+                $custom_keyword = isset($keywords[$url]) ? $keywords[$url] : '';
 
-            if (!empty($custom_keyword)) {
-                // Search for the custom keyword in the visible text (case-insensitive)
-                if (preg_match("/{$custom_keyword}/i", $visible_text, $matches)) {
-                    $keyword_match = $matches[0];
+                if (!empty($custom_keyword)) {
+                    // Search for the custom keyword in the visible text (case-insensitive)
+                    if (preg_match("/{$custom_keyword}/i", $visible_text, $matches)) {
+                        $keyword_match = $matches[0];
+                    }
+                } else {
+                    // Extract the base domain name from the URL
+                    $domain = parse_url($url, PHP_URL_HOST);
+                    $base_domain = preg_replace('/^www\./', '', $domain);
+                    $base_domain = preg_replace('/\.[^.]+$/', '', $base_domain);
+                    
+                    // Convert the base domain name to a regex pattern
+                    $pattern = str_split($base_domain);
+                    $pattern = implode('\s*', $pattern);
+                    
+                    // Search for the pattern in the visible text (case-insensitive)
+                    if (preg_match("/{$pattern}/i", $visible_text, $matches)) {
+                        $keyword_match = $matches[0];
+                    }
                 }
-            } else {
-                // Extract the base domain name from the URL
-                $domain = parse_url($url, PHP_URL_HOST);
-                $base_domain = preg_replace('/^www\./', '', $domain);
-                $base_domain = preg_replace('/\.[^.]+$/', '', $base_domain);
                 
-                // Convert the base domain name to a regex pattern
-                $pattern = str_split($base_domain);
-                $pattern = implode('\s*', $pattern);
-                
-                // Search for the pattern in the visible text (case-insensitive)
-                if (preg_match("/{$pattern}/i", $visible_text, $matches)) {
-                    $keyword_match = $matches[0];
+                // Extract the site title from the HTML content
+                if (preg_match('/<title>(.*?)<\/title>/i', $page_content, $matches)) {
+                    $site_title = $matches[1];
                 }
-            }
-            
-            // Extract the site title from the HTML content
-            if (preg_match('/<title>(.*?)<\/title>/i', $page_content, $matches)) {
-                $site_title = $matches[1];
             }
         }
         
-        return array(
-            'status' => $status,
-            'keyword_match' => $keyword_match,
-            'site_title' => $site_title
-        );
+        if (strpos($status, 'Error') === false && $keyword_match !== 'No match found' && $ssl_valid) {
+            // All checks passed, return the result
+            return array(
+                'status' => $status,
+                'keyword_match' => $keyword_match,
+                'site_title' => $site_title
+            );
+        }
+        
+        // One or more checks failed, wait for the retry delay before trying again
+        sleep($retry_delay);
     }
+    
+    // All retries failed, return the last failed result
+    return array(
+        'status' => $status,
+        'keyword_match' => $keyword_match,
+        'site_title' => $site_title
+    );
 }
 
 function extract_visible_text($html) {
