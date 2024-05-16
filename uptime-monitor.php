@@ -65,7 +65,7 @@ function uptime_monitor_page() {
         uptime_monitor_perform_check($site);
     }
 
-    $sites = uptime_monitor_get_mainwp_sites();
+    $sites = uptime_monitor_get_mainwp_sites(true);
     $results = get_option('uptime_monitor_results', array());
     $keywords = get_option('uptime_monitor_keywords', array());
     
@@ -153,7 +153,7 @@ function uptime_monitor_enqueue_styles() {
 }
 add_action('admin_head', 'uptime_monitor_enqueue_styles');
 
-function uptime_monitor_get_mainwp_sites() {
+function uptime_monitor_get_mainwp_sites($get_tags = false) {
     global $wpdb;
 
     $mainwp_sites = array();
@@ -161,6 +161,18 @@ function uptime_monitor_get_mainwp_sites() {
     // Retrieve the list of child sites from MainWP
     $table_name = $wpdb->prefix . 'mainwp_wp';
     $query = "SELECT id, url FROM $table_name";
+
+    if (!$get_tags) {
+        $results = $wpdb->get_results($query);
+
+        // Create an array of site URLs
+        foreach ($results as $site) {
+            $mainwp_sites[] = $site->url;
+        }
+    
+        return $mainwp_sites;
+    }
+    
     $results = $wpdb->get_results($query, OBJECT_K);
 
     // Retrieve the tags from the mainwp_group table
