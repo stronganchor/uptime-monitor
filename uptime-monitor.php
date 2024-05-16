@@ -3,7 +3,7 @@
 Plugin Name: Uptime Monitor
 Plugin URI: https://github.com/stronganchor/uptime-monitor/
 Description: A plugin to monitor URLs and report their HTTP status.
-Version: 1.0.5
+Version: 1.0.6
 Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
 */
@@ -71,11 +71,14 @@ function uptime_monitor_page() {
     
     // Sort the sites based on status code and keyword match
     usort($sites, function($a, $b) use ($results) {
-        $status_a = isset($results[$a]['status']) ? $results[$a]['status'] : 'N/A';
-        $status_b = isset($results[$b]['status']) ? $results[$b]['status'] : 'N/A';
-        $keyword_a = isset($results[$a]['keyword_match']) ? $results[$a]['keyword_match'] : 'N/A';
-        $keyword_b = isset($results[$b]['keyword_match']) ? $results[$b]['keyword_match'] : 'N/A';
-
+        $site_url_a = key($a);
+        $site_url_b = key($b);
+        
+        $status_a = isset($results[$site_url_a]['status']) ? $results[$site_url_a]['status'] : 'N/A';
+        $status_b = isset($results[$site_url_b]['status']) ? $results[$site_url_b]['status'] : 'N/A';
+        $keyword_a = isset($results[$site_url_a]['keyword_match']) ? $results[$site_url_a]['keyword_match'] : 'N/A';
+        $keyword_b = isset($results[$site_url_b]['keyword_match']) ? $results[$site_url_b]['keyword_match'] : 'N/A';
+    
         if (strpos($status_a, 'Error') !== false && strpos($status_b, 'Error') === false) {
             return -1;
         } elseif (strpos($status_a, 'Error') === false && strpos($status_b, 'Error') !== false) {
@@ -85,7 +88,7 @@ function uptime_monitor_page() {
         } elseif ($keyword_a !== 'No match found' && $keyword_b === 'No match found') {
             return 1;
         } else {
-            return strcasecmp($a, $b);
+            return strcasecmp($site_url_a, $site_url_b);
         }
     });
 
@@ -98,33 +101,36 @@ function uptime_monitor_page() {
 
     echo '<h2>Sites to Monitor</h2>';
     echo '<table class="widefat">';
-    echo '<thead><tr><th>URL</th><th>Site Title</th><th>Site Status</th><th>Keyword Match</th><th>Custom Keyword</th><th>Action</th></tr></thead>';
+    echo '<thead><tr><th>URL</th><th>Site Title</th><th>Tags</th><th>Site Status</th><th>Keyword Match</th><th>Custom Keyword</th><th>Action</th></tr></thead>';
     echo '<tbody>';
 
-    foreach ($sites as $site) {
-        $status = isset($results[$site]['status']) ? $results[$site]['status'] : 'N/A';
-        $keyword_match = isset($results[$site]['keyword_match']) ? $results[$site]['keyword_match'] : 'N/A';
-        $custom_keyword = isset($keywords[$site]) ? $keywords[$site] : '';
-        $site_title = isset($results[$site]['site_title']) ? $results[$site]['site_title'] : 'N/A';
+    foreach ($sites as $site_info) {
+        $site_url = $site_info['site_url'];
+        $tags = $site_info['tags'];
+        $status = isset($results[$site_url]['status']) ? $results[$site_url]['status'] : 'N/A';
+        $keyword_match = isset($results[$site_url]['keyword_match']) ? $results[$site_url]['keyword_match'] : 'N/A';
+        $custom_keyword = isset($keywords[$site_url]) ? $keywords[$site_url] : '';
+        $site_title = isset($results[$site_url]['site_title']) ? $results[$site_url]['site_title'] : 'N/A';
 
         $status_class = (strpos($status, 'Error') !== false) ? 'error' : '';
         $keyword_class = ($keyword_match === 'No match found') ? 'error' : '';
 
         echo '<tr>';
-        echo '<td><a href="' . esc_url($site) . '" target="_blank">' . esc_html($site) . '</a></td>';
+        echo '<td><a href="' . esc_url($site_url) . '" target="_blank">' . esc_html($site_url) . '</a></td>';
         echo '<td>' . esc_html($site_title) . '</td>';
+        echo '<td>' . esc_html($tags) . '</td>';
         echo '<td class="' . $status_class . '">' . esc_html($status) . '</td>';
         echo '<td class="' . $keyword_class . '">' . esc_html($keyword_match) . '</td>';
         echo '<td>';
         echo '<form method="post" style="display: inline;">';
-        echo '<input type="hidden" name="site" value="' . esc_attr($site) . '">';
+        echo '<input type="hidden" name="site" value="' . esc_attr($site_url) . '">';
         echo '<input type="text" name="keyword" value="' . esc_attr($custom_keyword) . '">';
         echo '<input type="submit" name="update_keyword" class="button button-secondary" value="Update">';
         echo '</form>';
         echo '</td>';
         echo '<td>';
         echo '<form method="post" style="display: inline;">';
-        echo '<input type="hidden" name="site" value="' . esc_attr($site) . '">';
+        echo '<input type="hidden" name="site" value="' . esc_attr($site_url) . '">';
         echo '<input type="submit" name="recheck_site" class="button button-secondary" value="Recheck">';
         echo '</form>';
         echo '</td>';
@@ -154,11 +160,47 @@ function uptime_monitor_get_mainwp_sites() {
 
     // Retrieve the list of child sites from MainWP
     $table_name = $wpdb->prefix . 'mainwp_wp';
-    $query = "SELECT url FROM $table_name";
-    $results = $wpdb->get_results($query);
+    $query = "SELECT id, url FROM $table_name";
+    $results = $wpdb->get_results($query, OBJECT_K);
 
-    foreach ($results as $result) {
-        $mainwp_sites[] = $result->url;
+    // Retrieve the tags from the mainwp_group table
+    $group_table = $wpdb->prefix . 'mainwp_group';
+    $group_query = "SELECT id, name FROM $group_table";
+    $group_results = $wpdb->get_results($group_query);
+
+    // Create an array to map group IDs to their names
+    $group_names = array();
+    foreach ($group_results as $group) {
+        $group_id = $group->id;
+        $group_name = $group->name;
+        $group_names[$group_id] = $group_name;
+    }
+
+    // Retrieve the site-group mappings from the mainwp_wp_group table
+    $mapping_table = $wpdb->prefix . 'mainwp_wp_group';
+    $mapping_query = "SELECT wpid, groupid FROM $mapping_table";
+    $mapping_results = $wpdb->get_results($mapping_query);
+
+    // Create an array to store the tags for each site
+    $site_tags = array();
+    foreach ($mapping_results as $mapping) {
+        $site_id = $mapping->wpid;
+        $group_id = $mapping->groupid;
+        if (isset($results[$site_id]) && isset($group_names[$group_id])) {
+            $site_url = $results[$site_id]->url;
+            $tag_name = $group_names[$group_id];
+            $site_tags[$site_id][] = $tag_name;
+        }
+    }
+
+    // Combine the site information and their corresponding tags
+    foreach ($results as $site_id => $site) {
+        $site_url = $site->url;
+        $tags = isset($site_tags[$site_id]) ? implode(', ', $site_tags[$site_id]) : '';
+        $mainwp_sites[$site_url] = array(
+            'site_url' => $site_url,
+            'tags' => $tags
+        );
     }
 
     return $mainwp_sites;
