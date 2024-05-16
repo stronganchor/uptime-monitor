@@ -3,7 +3,7 @@
 Plugin Name: Uptime Monitor
 Plugin URI: https://github.com/stronganchor/uptime-monitor/
 Description: A plugin to monitor URLs and report their HTTP status.
-Version: 1.0.6
+Version: 1.0.7
 Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
 */
@@ -69,16 +69,16 @@ function uptime_monitor_page() {
     $results = get_option('uptime_monitor_results', array());
     $keywords = get_option('uptime_monitor_keywords', array());
     
-    // Sort the sites based on status code and keyword match
+    // Sort the sites based on status code, keyword match, and alphabetically by site URL
     usort($sites, function($a, $b) use ($results) {
-        $site_url_a = key($a);
-        $site_url_b = key($b);
+        $site_url_a = $a['site_url'];
+        $site_url_b = $b['site_url'];
         
         $status_a = isset($results[$site_url_a]['status']) ? $results[$site_url_a]['status'] : 'N/A';
         $status_b = isset($results[$site_url_b]['status']) ? $results[$site_url_b]['status'] : 'N/A';
         $keyword_a = isset($results[$site_url_a]['keyword_match']) ? $results[$site_url_a]['keyword_match'] : 'N/A';
         $keyword_b = isset($results[$site_url_b]['keyword_match']) ? $results[$site_url_b]['keyword_match'] : 'N/A';
-    
+
         if (strpos($status_a, 'Error') !== false && strpos($status_b, 'Error') === false) {
             return -1;
         } elseif (strpos($status_a, 'Error') === false && strpos($status_b, 'Error') !== false) {
