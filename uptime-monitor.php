@@ -3,7 +3,7 @@
 Plugin Name: Uptime Monitor
 Plugin URI: https://github.com/stronganchor/uptime-monitor/
 Description: A plugin to monitor URLs and report their HTTP status.
-Version: 1.0.8
+Version: 1.0.9
 Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
 */
@@ -111,7 +111,7 @@ function uptime_monitor_page() {
         $keyword_match = isset($results[$site_url]['keyword_match']) ? $results[$site_url]['keyword_match'] : 'N/A';
         $custom_keyword = isset($keywords[$site_url]) ? $keywords[$site_url] : '';
         $site_title = isset($results[$site_url]['site_title']) ? $results[$site_url]['site_title'] : 'N/A';
-        $last_checked_time = isset($last_checked[$site_url]) ? date('m/d H:i', $last_checked[$site_url]) : 'N/A';
+        $last_checked_time = isset($last_checked[$site_url]) ? date_i18n('m/d H:i', $last_checked[$site_url]) : 'N/A';
 
         $status_class = (strpos($status, 'Error') !== false) ? 'error' : '';
         $keyword_class = ($keyword_match === 'No match found') ? 'error' : '';
@@ -382,7 +382,7 @@ function uptime_monitor_perform_check($site) {
     $results = get_option('uptime_monitor_results', array());
     $results[$site] = $result;
     $last_checked = get_option('uptime_monitor_last_checked', array());
-    $last_checked[$site] = time();  // Store the current timestamp
+    $last_checked[$site] = current_time('timestamp');  // Store the current timestamp
     update_option('uptime_monitor_results', $results);
     update_option('uptime_monitor_last_checked', $last_checked);
 }
