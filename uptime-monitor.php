@@ -3,7 +3,7 @@
 Plugin Name: Uptime Monitor
 Plugin URI: https://github.com/stronganchor/uptime-monitor/
 Description: A plugin to monitor URLs and report their HTTP status.
-Version: 1.1.0
+Version: 1.0.9
 Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
 */
@@ -21,15 +21,6 @@ function uptime_monitor_menu() {
 add_action('admin_menu', 'uptime_monitor_menu');
 
 function uptime_monitor_page() {
-    // Check for button press to flush permalinks
-    if (isset($_POST['flush_permalinks'])) {
-        $sites = uptime_monitor_get_mainwp_sites();
-        foreach ($sites as $site) {
-            uptime_monitor_flush_permalinks($site);
-        }
-        echo '<div class="notice notice-success"><p>Permalinks flushed on all sites.</p></div>';
-    }
-
     if (isset($_POST['check_all_sites'])) {
         $sites = uptime_monitor_get_mainwp_sites();
         $failed_sites = array();
@@ -104,11 +95,6 @@ function uptime_monitor_page() {
     echo '<div class="wrap">';
     echo '<h1>Uptime Monitor</h1>';
 
-    // Form for flushing permalinks on all sites
-    echo '<form method="post" style="display: inline; margin-bottom: 20px; margin-right: 20px;">';
-    echo '<input type="submit" name="flush_permalinks" class="button button-primary" value="Flush Permalinks on All Sites">';
-    echo '</form>';
-
     echo '<form method="post" style="display: inline;">';
     echo '<input type="submit" name="check_all_sites" class="button button-primary" value="Check All Sites">';
     echo '</form>';
@@ -157,39 +143,6 @@ function uptime_monitor_page() {
     echo '</table>';
 
     echo '</div>';
-}
-
-
-// Function to flush permalinks on a specific site
-function uptime_monitor_flush_permalinks($site) {
-    $site_id = uptime_monitor_get_mainwp_site_id_by_url($site);
-    if ($site_id) {
-        MainWP_Child::instance()->flush_child_site_permalinks($site_id);
-    }
-}
-
-// Function to get site ID based on URL (helper function)
-function uptime_monitor_get_mainwp_site_id_by_url($url) {
-    global $wpdb;
-    $table_name = $wpdb->prefix . 'mainwp_wp';
-    return $wpdb->get_var($wpdb->prepare("SELECT id FROM $table_name WHERE url = %s", $url));
-}
-
-// Function to flush permalinks on child sites via MainWP
-class MainWP_Child {
-    public static function instance() {
-        static $instance = null;
-        if ($instance === null) {
-            $instance = new MainWP_Child();
-        }
-        return $instance;
-    }
-
-    public function flush_child_site_permalinks($site_id) {
-        // Simulate API call to flush permalinks on child site
-        do_action('mainwp_do_flush_permalinks', $site_id);
-        flush_rewrite_rules(); // Direct call to flush permalinks on the current site
-    }
 }
 
 function uptime_monitor_enqueue_styles() {
