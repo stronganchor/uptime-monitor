@@ -8,7 +8,7 @@ Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
 */
 
-// Step 1: Add the settings page to store cPanel credentials
+// Step 1: Add the settings page to store whm credentials
 function uptime_monitor_admin_menu() {
     add_menu_page(
         'Uptime Monitor',
@@ -30,69 +30,129 @@ function uptime_monitor_admin_menu() {
 }
 add_action('admin_menu', 'uptime_monitor_admin_menu');
 
-// Step 2: Settings page form for cPanel credentials
+// Step 2: Settings page form for whm credentials
 function uptime_monitor_settings_page() {
     if (isset($_POST['save_settings'])) {
-        update_option('uptime_monitor_cpanel_user', sanitize_text_field($_POST['cpanel_user']));
-        update_option('uptime_monitor_cpanel_api_token', sanitize_text_field($_POST['cpanel_api_token']));
-        update_option('uptime_monitor_cpanel_server_url', sanitize_text_field($_POST['cpanel_server_url']));
+        update_option('uptime_monitor_whm_user', sanitize_text_field($_POST['whm_user']));
+        update_option('uptime_monitor_whm_api_token', sanitize_text_field($_POST['whm_api_token']));
+        update_option('uptime_monitor_whm_server_url', sanitize_text_field($_POST['whm_server_url']));
         echo '<div class="notice notice-success"><p>Settings saved!</p></div>';
     }
 
-    $cpanel_user = get_option('uptime_monitor_cpanel_user', '');
-    $cpanel_api_token = get_option('uptime_monitor_cpanel_api_token', '');
-    $cpanel_server_url = get_option('uptime_monitor_cpanel_server_url', '');
+    $whm_user = get_option('uptime_monitor_whm_user', '');
+    $whm_api_token = get_option('uptime_monitor_whm_api_token', '');
+    $whm_server_url = get_option('uptime_monitor_whm_server_url', '');
 
     echo '<div class="wrap">';
     echo '<h1>Uptime Monitor Settings</h1>';
     echo '<form method="post">';
     echo '<table class="form-table">';
-    echo '<tr><th scope="row"><label for="cpanel_user">cPanel User</label></th><td><input type="text" id="cpanel_user" name="cpanel_user" value="' . esc_attr($cpanel_user) . '" class="regular-text"></td></tr>';
-    echo '<tr><th scope="row"><label for="cpanel_api_token">cPanel API Token</label></th><td><input type="text" id="cpanel_api_token" name="cpanel_api_token" value="' . esc_attr($cpanel_api_token) . '" class="regular-text"></td></tr>';
-    echo '<tr><th scope="row"><label for="cpanel_server_url">cPanel Server URL</label></th><td><input type="text" id="cpanel_server_url" name="cpanel_server_url" value="' . esc_attr($cpanel_server_url) . '" class="regular-text"></td></tr>';
+    echo '<tr><th scope="row"><label for="whm_user">WHM User (e.g. root)</label></th><td><input type="text" id="whm_user" name="whm_user" value="' . esc_attr($whm_user) . '" class="regular-text"></td></tr>';
+    echo '<tr><th scope="row"><label for="whm_api_token">WHM API Token</label></th><td><input type="text" id="whm_api_token" name="whm_api_token" value="' . esc_attr($whm_api_token) . '" class="regular-text"></td></tr>';
+    echo '<tr><th scope="row"><label for="whm_server_url">WHM Server URL (https://yourdomain.com:2087)</label></th><td><input type="text" id="whm_server_url" name="whm_server_url" value="' . esc_attr($whm_server_url) . '" class="regular-text"></td></tr>';
     echo '</table>';
     echo '<p class="submit"><input type="submit" name="save_settings" class="button button-primary" value="Save Settings"></p>';
     echo '</form>';
     echo '</div>';
 }
 
-// Step 3: Fetch server stats from the cPanel API
-function get_cpanel_server_stats() {
-    $cpanel_user = get_option('uptime_monitor_cpanel_user');
-    $cpanel_api_token = get_option('uptime_monitor_cpanel_api_token');
+// Step 3: Fetch server stats from the whm API
+function get_whm_server_stats() {
+    $whm_user = get_option('uptime_monitor_cpanel_user'); // Your WHM username
+    $whm_api_token = get_option('uptime_monitor_cpanel_api_token'); // Your WHM API token
     $server_url = get_option('uptime_monitor_cpanel_server_url');
 
-    if (empty($cpanel_user) || empty($cpanel_api_token) || empty($server_url)) {
-        return 'Please configure the cPanel credentials in the Uptime Monitor settings.';
+    if (empty($whm_user) || empty($whm_api_token) || empty($server_url)) {
+        return 'Please configure the WHM credentials in the Uptime Monitor settings.';
     }
 
-    $query = $server_url . '/json-api/getdiskusage?api.version=1';
-    
+    // Retrieve the list of accounts
+    $accounts = get_whm_account_list($whm_user, $whm_api_token, $server_url);
+    if (!is_array($accounts)) {
+        return $accounts; // Return the error message
+    }
+
+    $total_account_disk_usage = 0;
+    $accounts_data = [];
+
+    foreach ($accounts as $account) {
+        $username = $account['user'] ?? '';
+        $domain = $account['domain'] ?? '';
+        $disk_used = isset($account['diskused']) ? $account['diskused'] : '0';
+        $suspended = isset($account['suspended']) && $account['suspended'] ? 'Yes' : 'No';
+
+        // Remove commas and 'M' if present, then convert to float
+        $disk_used_clean = str_replace(['M', ','], '', $disk_used);
+        $disk_used_float = floatval($disk_used_clean);
+        $total_account_disk_usage += $disk_used_float;
+
+        $accounts_data[] = [
+            'username' => $username,
+            'domain' => $domain,
+            'disk_used' => $disk_used,
+            'suspended' => $suspended
+        ];
+    }
+
+    // Get total disk space and free space using PHP functions
+    $total_space_bytes = disk_total_space("/");
+    $free_space_bytes = disk_free_space("/");
+
+    if ($total_space_bytes === false || $free_space_bytes === false) {
+        $disk_usage_info = "Unable to retrieve total disk usage information.";
+    } else {
+        $used_space_bytes = $total_space_bytes - $free_space_bytes;
+
+        // Convert bytes to GB for readability
+        $total_space_gb = round($total_space_bytes / (1024 * 1024 * 1024), 2);
+        $free_space_gb = round($free_space_bytes / (1024 * 1024 * 1024), 2);
+        $used_space_gb = round($used_space_bytes / (1024 * 1024 * 1024), 2);
+
+        $disk_usage_info = "Total Disk Space: {$total_space_gb} GB<br>";
+        $disk_usage_info .= "Used Disk Space: {$used_space_gb} GB<br>";
+        $disk_usage_info .= "Free Disk Space: {$free_space_gb} GB<br>";
+    }
+
+    // Build the output
+    $output = $disk_usage_info . "<br>";
+    $output .= "Total cPanel Accounts Disk Usage: {$total_account_disk_usage} MB<br><br>";
+    $output .= "Accounts:<br>";
+    foreach ($accounts_data as $data) {
+        $output .= "User: {$data['username']}, Domain: {$data['domain']}, Disk Used: {$data['disk_used']}, Suspended: {$data['suspended']}<br>";
+    }
+
+    return $output;
+}
+
+function get_whm_account_list($whm_user, $whm_api_token, $server_url) {
+    $query = $server_url . '/json-api/listaccts?api.version=1';
+
     $curl = curl_init();
-    curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, 0);
-    curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, 0);
+    curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, 0); // For development; consider enabling in production
+    curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, 0); // For development; consider enabling in production
     curl_setopt($curl, CURLOPT_RETURNTRANSFER, 1);
-    curl_setopt($curl, CURLOPT_HTTPHEADER, array('Authorization: cpanel ' . $cpanel_user . ':' . $cpanel_api_token));
+    curl_setopt($curl, CURLOPT_HTTPHEADER, array('Authorization: whm ' . $whm_user . ':' . $whm_api_token));
     curl_setopt($curl, CURLOPT_URL, $query);
 
     $result = curl_exec($curl);
-    
+
     if (curl_errno($curl)) {
         return 'Error: ' . curl_error($curl);
     }
 
     curl_close($curl);
-    
-    $data = json_decode($result, true);
-    if (!empty($data['data'])) {
-        $disk_total = $data['data']['disk_total'];
-        $disk_used = $data['data']['disk_used'];
-        $disk_free = $data['data']['disk_free'];
 
-        return "Disk Usage: $disk_used of $disk_total used, $disk_free free.";
+    $data = json_decode($result, true);
+
+    if (isset($data['metadata']['result']) && $data['metadata']['result'] == 0) {
+        return 'API Error: ' . $data['metadata']['reason'];
     }
 
-    return 'Unable to fetch disk usage data.';
+    if (empty($data['data']['acct'])) {
+        return 'No accounts found or insufficient permissions.';
+    }
+
+    return $data['data']['acct'];
 }
 
 // Step 4: Display server stats at the top of the Uptime Monitor page
@@ -101,9 +161,9 @@ function uptime_monitor_page() {
     echo '<h1>Uptime Monitor</h1>';
 
     // Fetch and display the server stats
-    $server_stats = get_cpanel_server_stats();
+    $server_stats = get_whm_server_stats();
     echo '<h2>Server Stats</h2>';
-    echo '<p>' . esc_html($server_stats) . '</p>';
+    echo '<p>' . wp_kses_post($server_stats) . '</p>';
 
     if (isset($_POST['check_all_sites'])) {
         $sites = uptime_monitor_get_mainwp_sites();
@@ -467,7 +527,6 @@ function uptime_monitor_perform_check($site) {
     update_option('uptime_monitor_results', $results);
     update_option('uptime_monitor_last_checked', $last_checked);
 }
-add_action('uptime_monitor_hourly_check', 'uptime_monitor_perform_check');
 
 function uptime_monitor_send_notification($failed_sites) {
     $admin_email = get_option('admin_email');
