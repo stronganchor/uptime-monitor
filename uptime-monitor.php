@@ -3,7 +3,7 @@
 Plugin Name: Uptime Monitor
 Plugin URI: https://github.com/stronganchor/uptime-monitor/
 Description: A plugin to monitor URLs and report their HTTP status and display server stats.
-Version: 1.1.0
+Version: 1.1.1
 Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
 */
@@ -366,6 +366,19 @@ function uptime_monitor_check_status($url, $retry_count = 3, $retry_delay = 5) {
         'timeout' => 15,
     );
 
+    // Get the custom keyword for the site, if available
+    $keywords = get_option('uptime_monitor_keywords', array());
+    $custom_keyword = isset($keywords[$url]) ? $keywords[$url] : '';
+
+    // Skip the keyword check if custom keyword is set to "N/A"
+    if (strtoupper($custom_keyword) === 'N/A') {
+        return array(
+            'status' => 'OK (Keyword check skipped)',
+            'keyword_match' => 'Skipped',
+            'site_title' => 'N/A'
+        );
+    }
+
     for ($i = 0; $i < $retry_count; $i++) {
         $response = wp_remote_get($url, $args);
 
@@ -393,10 +406,6 @@ function uptime_monitor_check_status($url, $retry_count = 3, $retry_delay = 5) {
 
                 // Extract visible text from the HTML content
                 $visible_text = extract_visible_text($page_content);
-
-                // Get the custom keyword for the site, if available
-                $keywords = get_option('uptime_monitor_keywords', array());
-                $custom_keyword = isset($keywords[$url]) ? $keywords[$url] : '';
 
                 if (!empty($custom_keyword)) {
                     // Search for the custom keyword in the visible text (case-insensitive)
