@@ -2,13 +2,14 @@
 /*
 Plugin Name: Uptime Monitor
 Plugin URI: https://github.com/stronganchor/uptime-monitor/
-Description: A plugin to monitor URLs and report their HTTP status.
-Version: 1.0.9
+Description: A plugin to monitor URLs and report their HTTP status and display server stats.
+Version: 1.1.0
 Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
 */
 
-function uptime_monitor_menu() {
+// Step 1: Add the settings page to store cPanel credentials
+function uptime_monitor_admin_menu() {
     add_menu_page(
         'Uptime Monitor',
         'Uptime Monitor',
@@ -17,10 +18,93 @@ function uptime_monitor_menu() {
         'uptime_monitor_page',
         'dashicons-admin-links'
     );
-}
-add_action('admin_menu', 'uptime_monitor_menu');
 
+    add_submenu_page(
+        'uptime-monitor',
+        'Uptime Monitor Settings',
+        'Settings',
+        'manage_options',
+        'uptime-monitor-settings',
+        'uptime_monitor_settings_page'
+    );
+}
+add_action('admin_menu', 'uptime_monitor_admin_menu');
+
+// Step 2: Settings page form for cPanel credentials
+function uptime_monitor_settings_page() {
+    if (isset($_POST['save_settings'])) {
+        update_option('uptime_monitor_cpanel_user', sanitize_text_field($_POST['cpanel_user']));
+        update_option('uptime_monitor_cpanel_api_token', sanitize_text_field($_POST['cpanel_api_token']));
+        update_option('uptime_monitor_cpanel_server_url', sanitize_text_field($_POST['cpanel_server_url']));
+        echo '<div class="notice notice-success"><p>Settings saved!</p></div>';
+    }
+
+    $cpanel_user = get_option('uptime_monitor_cpanel_user', '');
+    $cpanel_api_token = get_option('uptime_monitor_cpanel_api_token', '');
+    $cpanel_server_url = get_option('uptime_monitor_cpanel_server_url', '');
+
+    echo '<div class="wrap">';
+    echo '<h1>Uptime Monitor Settings</h1>';
+    echo '<form method="post">';
+    echo '<table class="form-table">';
+    echo '<tr><th scope="row"><label for="cpanel_user">cPanel User</label></th><td><input type="text" id="cpanel_user" name="cpanel_user" value="' . esc_attr($cpanel_user) . '" class="regular-text"></td></tr>';
+    echo '<tr><th scope="row"><label for="cpanel_api_token">cPanel API Token</label></th><td><input type="text" id="cpanel_api_token" name="cpanel_api_token" value="' . esc_attr($cpanel_api_token) . '" class="regular-text"></td></tr>';
+    echo '<tr><th scope="row"><label for="cpanel_server_url">cPanel Server URL</label></th><td><input type="text" id="cpanel_server_url" name="cpanel_server_url" value="' . esc_attr($cpanel_server_url) . '" class="regular-text"></td></tr>';
+    echo '</table>';
+    echo '<p class="submit"><input type="submit" name="save_settings" class="button button-primary" value="Save Settings"></p>';
+    echo '</form>';
+    echo '</div>';
+}
+
+// Step 3: Fetch server stats from the cPanel API
+function get_cpanel_server_stats() {
+    $cpanel_user = get_option('uptime_monitor_cpanel_user');
+    $cpanel_api_token = get_option('uptime_monitor_cpanel_api_token');
+    $server_url = get_option('uptime_monitor_cpanel_server_url');
+
+    if (empty($cpanel_user) || empty($cpanel_api_token) || empty($server_url)) {
+        return 'Please configure the cPanel credentials in the Uptime Monitor settings.';
+    }
+
+    $query = $server_url . '/json-api/getdiskusage?api.version=1';
+    
+    $curl = curl_init();
+    curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, 0);
+    curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, 0);
+    curl_setopt($curl, CURLOPT_RETURNTRANSFER, 1);
+    curl_setopt($curl, CURLOPT_HTTPHEADER, array('Authorization: cpanel ' . $cpanel_user . ':' . $cpanel_api_token));
+    curl_setopt($curl, CURLOPT_URL, $query);
+
+    $result = curl_exec($curl);
+    
+    if (curl_errno($curl)) {
+        return 'Error: ' . curl_error($curl);
+    }
+
+    curl_close($curl);
+    
+    $data = json_decode($result, true);
+    if (!empty($data['data'])) {
+        $disk_total = $data['data']['disk_total'];
+        $disk_used = $data['data']['disk_used'];
+        $disk_free = $data['data']['disk_free'];
+
+        return "Disk Usage: $disk_used of $disk_total used, $disk_free free.";
+    }
+
+    return 'Unable to fetch disk usage data.';
+}
+
+// Step 4: Display server stats at the top of the Uptime Monitor page
 function uptime_monitor_page() {
+    echo '<div class="wrap">';
+    echo '<h1>Uptime Monitor</h1>';
+
+    // Fetch and display the server stats
+    $server_stats = get_cpanel_server_stats();
+    echo '<h2>Server Stats</h2>';
+    echo '<p>' . esc_html($server_stats) . '</p>';
+
     if (isset($_POST['check_all_sites'])) {
         $sites = uptime_monitor_get_mainwp_sites();
         $failed_sites = array();
@@ -92,14 +176,11 @@ function uptime_monitor_page() {
         }
     });
 
-    echo '<div class="wrap">';
-    echo '<h1>Uptime Monitor</h1>';
-
     echo '<form method="post" style="display: inline;">';
     echo '<input type="submit" name="check_all_sites" class="button button-primary" value="Check All Sites">';
     echo '</form>';
 
-    echo '<h2>Sites to Monitor</h2>';
+    echo '<h2>MainWP Child Sites</h2>';
     echo '<table class="widefat">';
     echo '<thead><tr><th>URL</th><th>Site Title</th><th>Tags</th><th>Site Status</th><th>Keyword Match</th><th>Custom Keyword</th><th>Last Checked</th><th>Action</th></tr></thead>';
     echo '<tbody>';
