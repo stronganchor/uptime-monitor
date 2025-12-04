@@ -3,7 +3,7 @@
 Plugin Name: Uptime Monitor
 Plugin URI: https://github.com/stronganchor/uptime-monitor/
 Description: A plugin to monitor URLs and report their HTTP status and display server stats.
-Version: 1.1.1
+Version: 1.1.2
 Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
 */
@@ -30,26 +30,63 @@ function uptime_monitor_admin_menu() {
 }
 add_action('admin_menu', 'uptime_monitor_admin_menu');
 
-// Step 2: Settings page form for whm credentials
+// Helper: get validated MainWP from-email override
+function uptime_monitor_get_mainwp_from_email() {
+    $email = get_option('uptime_monitor_mainwp_from_email', '');
+    $email = sanitize_email($email);
+    return is_email($email) ? $email : '';
+}
+
+// Step 2: Settings page form for whm credentials + MainWP from-email override
 function uptime_monitor_settings_page() {
     if (isset($_POST['save_settings'])) {
+        // WHM settings
         update_option('uptime_monitor_whm_user', sanitize_text_field($_POST['whm_user']));
         update_option('uptime_monitor_whm_api_token', sanitize_text_field($_POST['whm_api_token']));
         update_option('uptime_monitor_whm_server_url', sanitize_text_field($_POST['whm_server_url']));
+
+        // MainWP From Email override
+        $mainwp_from_email = isset($_POST['mainwp_from_email']) ? sanitize_email($_POST['mainwp_from_email']) : '';
+        update_option('uptime_monitor_mainwp_from_email', $mainwp_from_email);
+
         echo '<div class="notice notice-success"><p>Settings saved!</p></div>';
     }
 
-    $whm_user = get_option('uptime_monitor_whm_user', '');
-    $whm_api_token = get_option('uptime_monitor_whm_api_token', '');
-    $whm_server_url = get_option('uptime_monitor_whm_server_url', '');
+    $whm_user          = get_option('uptime_monitor_whm_user', '');
+    $whm_api_token     = get_option('uptime_monitor_whm_api_token', '');
+    $whm_server_url    = get_option('uptime_monitor_whm_server_url', '');
+    $mainwp_from_email = get_option('uptime_monitor_mainwp_from_email', '');
 
     echo '<div class="wrap">';
     echo '<h1>Uptime Monitor Settings</h1>';
     echo '<form method="post">';
     echo '<table class="form-table">';
-    echo '<tr><th scope="row"><label for="whm_user">WHM User (e.g. root)</label></th><td><input type="text" id="whm_user" name="whm_user" value="' . esc_attr($whm_user) . '" class="regular-text"></td></tr>';
-    echo '<tr><th scope="row"><label for="whm_api_token">WHM API Token</label></th><td><input type="text" id="whm_api_token" name="whm_api_token" value="' . esc_attr($whm_api_token) . '" class="regular-text"></td></tr>';
-    echo '<tr><th scope="row"><label for="whm_server_url">WHM Server URL (https://yourdomain.com:2087)</label></th><td><input type="text" id="whm_server_url" name="whm_server_url" value="' . esc_attr($whm_server_url) . '" class="regular-text"></td></tr>';
+
+    // WHM fields
+    echo '<tr>';
+    echo '<th scope="row"><label for="whm_user">WHM User (e.g. root)</label></th>';
+    echo '<td><input type="text" id="whm_user" name="whm_user" value="' . esc_attr($whm_user) . '" class="regular-text"></td>';
+    echo '</tr>';
+
+    echo '<tr>';
+    echo '<th scope="row"><label for="whm_api_token">WHM API Token</label></th>';
+    echo '<td><input type="text" id="whm_api_token" name="whm_api_token" value="' . esc_attr($whm_api_token) . '" class="regular-text"></td>';
+    echo '</tr>';
+
+    echo '<tr>';
+    echo '<th scope="row"><label for="whm_server_url">WHM Server URL (https://yourdomain.com:2087)</label></th>';
+    echo '<td><input type="text" id="whm_server_url" name="whm_server_url" value="' . esc_attr($whm_server_url) . '" class="regular-text"></td>';
+    echo '</tr>';
+
+    // MainWP From Email override field
+    echo '<tr>';
+    echo '<th scope="row"><label for="mainwp_from_email">MainWP "From" Email Override</label></th>';
+    echo '<td>';
+    echo '<input type="email" id="mainwp_from_email" name="mainwp_from_email" value="' . esc_attr($mainwp_from_email) . '" class="regular-text">';
+    echo '<p class="description">Optional. If set, MainWP emails and Uptime Monitor alerts will use this as the From address.</p>';
+    echo '</td>';
+    echo '</tr>';
+
     echo '</table>';
     echo '<p class="submit"><input type="submit" name="save_settings" class="button button-primary" value="Save Settings"></p>';
     echo '</form>';
@@ -76,44 +113,40 @@ function get_whm_server_stats() {
     $accounts_data = [];
 
     foreach ($accounts as $account) {
-        $username = $account['user'] ?? '';
-        $domain = $account['domain'] ?? '';
+        $username  = $account['user'] ?? '';
+        $domain    = $account['domain'] ?? '';
         $disk_used = isset($account['diskused']) ? $account['diskused'] : '0';
         $suspended = isset($account['suspended']) && $account['suspended'] ? 'Yes' : 'No';
 
-        // Remove commas and 'M' if present, then convert to float
         $disk_used_clean = str_replace(['M', ','], '', $disk_used);
         $disk_used_float = floatval($disk_used_clean);
         $total_account_disk_usage += $disk_used_float;
 
         $accounts_data[] = [
-            'username' => $username,
-            'domain' => $domain,
+            'username'  => $username,
+            'domain'    => $domain,
             'disk_used' => $disk_used,
-            'suspended' => $suspended
+            'suspended' => $suspended,
         ];
     }
 
-    // Get total disk space and free space using PHP functions
     $total_space_bytes = disk_total_space("/");
-    $free_space_bytes = disk_free_space("/");
+    $free_space_bytes  = disk_free_space("/");
 
     if ($total_space_bytes === false || $free_space_bytes === false) {
         $disk_usage_info = "Unable to retrieve total disk usage information.";
     } else {
         $used_space_bytes = $total_space_bytes - $free_space_bytes;
 
-        // Convert bytes to GB for readability
         $total_space_gb = round($total_space_bytes / (1024 * 1024 * 1024), 2);
-        $free_space_gb = round($free_space_bytes / (1024 * 1024 * 1024), 2);
-        $used_space_gb = round($used_space_bytes / (1024 * 1024 * 1024), 2);
+        $free_space_gb  = round($free_space_bytes / (1024 * 1024 * 1024), 2);
+        $used_space_gb  = round($used_space_bytes / (1024 * 1024 * 1024), 2);
 
-        $disk_usage_info = "Total Disk Space: {$total_space_gb} GB<br>";
+        $disk_usage_info  = "Total Disk Space: {$total_space_gb} GB<br>";
         $disk_usage_info .= "Used Disk Space: {$used_space_gb} GB<br>";
         $disk_usage_info .= "Free Disk Space: {$free_space_gb} GB<br>";
     }
 
-    // Build the output
     $output = $disk_usage_info . "<br>";
     $output .= "Total cPanel Accounts Disk Usage: {$total_account_disk_usage} MB<br><br>";
     $output .= "Accounts:<br>";
@@ -131,7 +164,7 @@ function get_whm_account_list($whm_user, $whm_api_token, $server_url) {
     curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, 0); // For development; consider enabling in production
     curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, 0); // For development; consider enabling in production
     curl_setopt($curl, CURLOPT_RETURNTRANSFER, 1);
-    curl_setopt($curl, CURLOPT_HTTPHEADER, array('Authorization: whm ' . $whm_user . ':' . $whm_api_token));
+    curl_setopt($curl, CURLOPT_HTTPHEADER, ['Authorization: whm ' . $whm_user . ':' . $whm_api_token]);
     curl_setopt($curl, CURLOPT_URL, $query);
 
     $result = curl_exec($curl);
@@ -167,7 +200,7 @@ function uptime_monitor_page() {
 
     if (isset($_POST['check_all_sites'])) {
         $sites = uptime_monitor_get_mainwp_sites();
-        $failed_sites = array();
+        $failed_sites = [];
 
         foreach ($sites as $site) {
             uptime_monitor_perform_check($site);
@@ -184,21 +217,19 @@ function uptime_monitor_page() {
     }
 
     if (isset($_POST['update_keyword'])) {
-        $site = sanitize_text_field($_POST['site']);
+        $site    = sanitize_text_field($_POST['site']);
         $keyword = sanitize_text_field($_POST['keyword']);
-        $keywords = get_option('uptime_monitor_keywords', array());
+        $keywords = get_option('uptime_monitor_keywords', []);
         $keywords[$site] = $keyword;
         update_option('uptime_monitor_keywords', $keywords);
 
-        // Perform an immediate check for the site with the updated keyword
         uptime_monitor_perform_check($site);
 
-        // Check if the site fails the checks after updating the keyword
         $result = uptime_monitor_check_status($site);
         if (strpos($result['status'], 'Error') !== false || $result['keyword_match'] === 'No match found') {
-            $failed_sites = array(
-                $site => $result['status'] . ' - ' . $result['keyword_match']
-            );
+            $failed_sites = [
+                $site => $result['status'] . ' - ' . $result['keyword_match'],
+            ];
             uptime_monitor_send_notification($failed_sites);
         }
     }
@@ -208,12 +239,11 @@ function uptime_monitor_page() {
         uptime_monitor_perform_check($site);
     }
 
-    $sites = uptime_monitor_get_mainwp_sites(true);
-    $results = get_option('uptime_monitor_results', array());
-    $keywords = get_option('uptime_monitor_keywords', array());
-    $last_checked = get_option('uptime_monitor_last_checked', array());
+    $sites        = uptime_monitor_get_mainwp_sites(true);
+    $results      = get_option('uptime_monitor_results', []);
+    $keywords     = get_option('uptime_monitor_keywords', []);
+    $last_checked = get_option('uptime_monitor_last_checked', []);
 
-    // Sort the sites based on status code, keyword match, and alphabetically by site URL
     usort($sites, function($a, $b) use ($results) {
         $site_url_a = $a['site_url'];
         $site_url_b = $b['site_url'];
@@ -246,15 +276,15 @@ function uptime_monitor_page() {
     echo '<tbody>';
 
     foreach ($sites as $site_info) {
-        $site_url = $site_info['site_url'];
-        $tags = $site_info['tags'];
-        $status = isset($results[$site_url]['status']) ? $results[$site_url]['status'] : 'N/A';
+        $site_url   = $site_info['site_url'];
+        $tags       = $site_info['tags'];
+        $status     = isset($results[$site_url]['status']) ? $results[$site_url]['status'] : 'N/A';
         $keyword_match = isset($results[$site_url]['keyword_match']) ? $results[$site_url]['keyword_match'] : 'N/A';
         $custom_keyword = isset($keywords[$site_url]) ? $keywords[$site_url] : '';
-        $site_title = isset($results[$site_url]['site_title']) ? $results[$site_url]['site_title'] : 'N/A';
+        $site_title  = isset($results[$site_url]['site_title']) ? $results[$site_url]['site_title'] : 'N/A';
         $last_checked_time = isset($last_checked[$site_url]) ? date_i18n('m/d H:i', $last_checked[$site_url]) : 'N/A';
 
-        $status_class = (strpos($status, 'Error') !== false) ? 'error' : '';
+        $status_class  = (strpos($status, 'Error') !== false) ? 'error' : '';
         $keyword_class = ($keyword_match === 'No match found') ? 'error' : '';
 
         echo '<tr>';
@@ -299,47 +329,39 @@ add_action('admin_head', 'uptime_monitor_enqueue_styles');
 function uptime_monitor_get_mainwp_sites($get_tags = false) {
     global $wpdb;
 
-    $mainwp_sites = array();
+    $mainwp_sites = [];
 
-    // Retrieve the list of child sites from MainWP
     $table_name = $wpdb->prefix . 'mainwp_wp';
     $query = "SELECT id, url FROM $table_name";
 
     if (!$get_tags) {
         $results = $wpdb->get_results($query);
 
-        // Create an array of site URLs
         foreach ($results as $site) {
             $mainwp_sites[] = $site->url;
         }
-    
+
         return $mainwp_sites;
     }
-    
+
     $results = $wpdb->get_results($query, OBJECT_K);
 
-    // Retrieve the tags from the mainwp_group table
-    $group_table = $wpdb->prefix . 'mainwp_group';
-    $group_query = "SELECT id, name FROM $group_table";
+    $group_table  = $wpdb->prefix . 'mainwp_group';
+    $group_query  = "SELECT id, name FROM $group_table";
     $group_results = $wpdb->get_results($group_query);
 
-    // Create an array to map group IDs to their names
-    $group_names = array();
+    $group_names = [];
     foreach ($group_results as $group) {
-        $group_id = $group->id;
-        $group_name = $group->name;
-        $group_names[$group_id] = $group_name;
+        $group_names[$group->id] = $group->name;
     }
 
-    // Retrieve the site-group mappings from the mainwp_wp_group table
-    $mapping_table = $wpdb->prefix . 'mainwp_wp_group';
-    $mapping_query = "SELECT wpid, groupid FROM $mapping_table";
+    $mapping_table  = $wpdb->prefix . 'mainwp_wp_group';
+    $mapping_query  = "SELECT wpid, groupid FROM $mapping_table";
     $mapping_results = $wpdb->get_results($mapping_query);
 
-    // Create an array to store the tags for each site
-    $site_tags = array();
+    $site_tags = [];
     foreach ($mapping_results as $mapping) {
-        $site_id = $mapping->wpid;
+        $site_id  = $mapping->wpid;
         $group_id = $mapping->groupid;
         if (isset($results[$site_id]) && isset($group_names[$group_id])) {
             $site_url = $results[$site_id]->url;
@@ -348,35 +370,32 @@ function uptime_monitor_get_mainwp_sites($get_tags = false) {
         }
     }
 
-    // Combine the site information and their corresponding tags
     foreach ($results as $site_id => $site) {
         $site_url = $site->url;
-        $tags = isset($site_tags[$site_id]) ? implode(', ', $site_tags[$site_id]) : '';
-        $mainwp_sites[$site_url] = array(
+        $tags     = isset($site_tags[$site_id]) ? implode(', ', $site_tags[$site_id]) : '';
+        $mainwp_sites[$site_url] = [
             'site_url' => $site_url,
-            'tags' => $tags
-        );
+            'tags'     => $tags,
+        ];
     }
 
     return $mainwp_sites;
 }
 
 function uptime_monitor_check_status($url, $retry_count = 3, $retry_delay = 5) {
-    $args = array(
+    $args = [
         'timeout' => 15,
-    );
+    ];
 
-    // Get the custom keyword for the site, if available
-    $keywords = get_option('uptime_monitor_keywords', array());
+    $keywords = get_option('uptime_monitor_keywords', []);
     $custom_keyword = isset($keywords[$url]) ? $keywords[$url] : '';
 
-    // Skip the keyword check if custom keyword is set to "N/A"
     if (strtoupper($custom_keyword) === 'N/A') {
-        return array(
-            'status' => 'OK (Keyword check skipped)',
+        return [
+            'status'        => 'OK (Keyword check skipped)',
             'keyword_match' => 'Skipped',
-            'site_title' => 'N/A'
-        );
+            'site_title'    => 'N/A',
+        ];
     }
 
     for ($i = 0; $i < $retry_count; $i++) {
@@ -384,11 +403,11 @@ function uptime_monitor_check_status($url, $retry_count = 3, $retry_delay = 5) {
 
         if (is_wp_error($response)) {
             $error_message = $response->get_error_message();
-            $status = "Error: $error_message";
+            $status        = "Error: $error_message";
             $keyword_match = 'N/A';
-            $site_title = 'N/A';
+            $site_title    = 'N/A';
         } else {
-            $status_code = wp_remote_retrieve_response_code($response);
+            $status_code    = wp_remote_retrieve_response_code($response);
             $status_message = wp_remote_retrieve_response_message($response);
 
             $ssl_valid = uptime_monitor_check_ssl($url);
@@ -399,36 +418,30 @@ function uptime_monitor_check_status($url, $retry_count = 3, $retry_delay = 5) {
             }
 
             $keyword_match = 'No match found';
-            $site_title = 'N/A';
+            $site_title    = 'N/A';
 
             if ($status_code === 200) {
                 $page_content = wp_remote_retrieve_body($response);
 
-                // Extract visible text from the HTML content
                 $visible_text = extract_visible_text($page_content);
 
                 if (!empty($custom_keyword)) {
-                    // Search for the custom keyword in the visible text (case-insensitive)
                     if (preg_match("/{$custom_keyword}/i", $visible_text, $matches)) {
                         $keyword_match = $matches[0];
                     }
                 } else {
-                    // Extract the base domain name from the URL
-                    $domain = parse_url($url, PHP_URL_HOST);
+                    $domain      = parse_url($url, PHP_URL_HOST);
                     $base_domain = preg_replace('/^www\./', '', $domain);
                     $base_domain = preg_replace('/\.[^.]+$/', '', $base_domain);
 
-                    // Convert the base domain name to a regex pattern
                     $pattern = str_split($base_domain);
                     $pattern = implode('\s*', $pattern);
 
-                    // Search for the pattern in the visible text (case-insensitive)
                     if (preg_match("/{$pattern}/i", $visible_text, $matches)) {
                         $keyword_match = $matches[0];
                     }
                 }
 
-                // Extract the site title from the HTML content
                 if (preg_match('/<title>(.*?)<\/title>/i', $page_content, $matches)) {
                     $site_title = $matches[1];
                 }
@@ -436,40 +449,31 @@ function uptime_monitor_check_status($url, $retry_count = 3, $retry_delay = 5) {
         }
 
         if (strpos($status, 'Error') === false && $keyword_match !== 'No match found' && $ssl_valid) {
-            // All checks passed, return the result
-            return array(
-                'status' => $status,
+            return [
+                'status'        => $status,
                 'keyword_match' => $keyword_match,
-                'site_title' => $site_title
-            );
+                'site_title'    => $site_title,
+            ];
         }
 
-        // One or more checks failed, wait for the retry delay before trying again
         sleep($retry_delay);
     }
 
-    // All retries failed, return the last failed result
-    return array(
-        'status' => $status,
+    return [
+        'status'        => $status,
         'keyword_match' => $keyword_match,
-        'site_title' => $site_title
-    );
+        'site_title'    => $site_title,
+    ];
 }
 
 function extract_visible_text($html) {
-    // Create a new DOMDocument object
     $dom = new DOMDocument();
-
-    // Load the HTML content into the DOMDocument object
     @$dom->loadHTML($html);
 
-    // Create a new DOMXPath object
     $xpath = new DOMXPath($dom);
 
-    // Query for all visible text nodes
     $text_nodes = $xpath->query('//text()[not(ancestor::script) and not(ancestor::style)]');
 
-    // Extract the visible text from the text nodes
     $visible_text = '';
     foreach ($text_nodes as $text_node) {
         $visible_text .= ' ' . trim($text_node->nodeValue);
@@ -485,10 +489,10 @@ function uptime_monitor_check_ssl($url) {
 
     $context = stream_context_create([
         'ssl' => [
-            'verify_peer' => true,
+            'verify_peer'      => true,
             'verify_peer_name' => true,
-            'peer_name' => $host
-        ]
+            'peer_name'        => $host,
+        ],
     ]);
 
     $stream = @stream_socket_client("ssl://$host:$port", $errno, $errstr, 30, STREAM_CLIENT_CONNECT, $context);
@@ -510,14 +514,14 @@ add_action('init', 'uptime_monitor_schedule_task');
 
 function uptime_monitor_perform_hourly_check() {
     $sites = uptime_monitor_get_mainwp_sites();
-    $failed_sites = array();
+    $failed_sites = [];
 
     foreach ($sites as $site) {
         uptime_monitor_perform_check($site);
         $result = uptime_monitor_check_status($site);
 
         if (strpos($result['status'], 'Error') !== false || $result['keyword_match'] === 'No match found') {
-            $failed_sites[$site] = $result['status'] . ' - ' . $result['keyword_match'];
+            $failed_sites[$site] = $result['status'] . ' - $result[\"keyword_match\"]';
         }
     }
 
@@ -528,19 +532,26 @@ function uptime_monitor_perform_hourly_check() {
 add_action('uptime_monitor_hourly_check', 'uptime_monitor_perform_hourly_check');
 
 function uptime_monitor_perform_check($site) {
-    $result = uptime_monitor_check_status($site);
-    $results = get_option('uptime_monitor_results', array());
+    $result       = uptime_monitor_check_status($site);
+    $results      = get_option('uptime_monitor_results', []);
     $results[$site] = $result;
-    $last_checked = get_option('uptime_monitor_last_checked', array());
-    $last_checked[$site] = current_time('timestamp');  // Store the current timestamp
+    $last_checked = get_option('uptime_monitor_last_checked', []);
+    $last_checked[$site] = current_time('timestamp');
     update_option('uptime_monitor_results', $results);
     update_option('uptime_monitor_last_checked', $last_checked);
 }
 
 function uptime_monitor_send_notification($failed_sites) {
     $admin_email = get_option('admin_email');
-    $site_url = get_site_url();
-    $from_email = 'noreply@' . parse_url($site_url, PHP_URL_HOST);
+    $site_url    = get_site_url();
+
+    // Use MainWP override if present; otherwise fall back to noreply@domain
+    $override_email = uptime_monitor_get_mainwp_from_email();
+    if ($override_email) {
+        $from_email = $override_email;
+    } else {
+        $from_email = 'noreply@' . parse_url($site_url, PHP_URL_HOST);
+    }
 
     $num_failed_sites = count($failed_sites);
     $subject = 'Uptime Monitor: ' . $num_failed_sites . ' Site' . ($num_failed_sites > 1 ? 's' : '') . ' Failed';
@@ -550,18 +561,36 @@ function uptime_monitor_send_notification($failed_sites) {
     foreach ($failed_sites as $site => $error) {
         $error_parts = explode(' - ', $error);
         $status = $error_parts[0];
-        $keyword = $error_parts[1];
+        $keyword = isset($error_parts[1]) ? $error_parts[1] : '';
 
         $message .= "Site: $site\n";
         $message .= "Site Status: $status\n";
         $message .= "Keyword: $keyword\n\n";
     }
 
-    $headers = array(
+    $headers = [
         'From: Uptime Monitor <' . $from_email . '>',
-        'Content-Type: text/plain; charset=UTF-8'
-    );
+        'Content-Type: text/plain; charset=UTF-8',
+    ];
 
     wp_mail($admin_email, $subject, $message, $headers);
+}
+
+// Hook to override MainWP email From header using the saved setting
+add_filter('mainwp_send_mail_from_header', 'uptime_monitor_mainwp_send_mail_from_header', 10, 3);
+function uptime_monitor_mainwp_send_mail_from_header($input, $email, $subject) {
+    $custom_email = uptime_monitor_get_mainwp_from_email();
+    if (!$custom_email) {
+        return $input;
+    }
+
+    $from_name = isset($input['from_name']) && !empty($input['from_name'])
+        ? $input['from_name']
+        : wp_specialchars_decode(get_bloginfo('name'), ENT_QUOTES);
+
+    return [
+        'from_name'  => $from_name,
+        'from_email' => $custom_email,
+    ];
 }
 ?>
