@@ -81,10 +81,7 @@ function uptime_monitor_settings_page() {
 
     echo '<tr>';
     echo '<th scope="row"><label for="whm_api_token">WHM API Token</label></th>';
-    echo '<td>';
-    echo '<input type="text" id="whm_api_token" name="whm_api_token" value="' . esc_attr($whm_api_token) . '" class="regular-text">';
-    echo '<p class="description">Recommended: use a least-privilege WHM token. Owner/reseller-scoped tokens are supported; accounts outside token scope will show bandwidth/inode metrics as N/A.</p>';
-    echo '</td>';
+    echo '<td><input type="text" id="whm_api_token" name="whm_api_token" value="' . esc_attr($whm_api_token) . '" class="regular-text"></td>';
     echo '</tr>';
 
     echo '<tr>';
@@ -1100,51 +1097,6 @@ function uptime_monitor_render_server_stats($stats) {
         echo '<p class="uptime-monitor-disk-warning">' . esc_html($stats['account_metrics_warning']) . '</p>';
     }
 
-    $metrics_coverage = (isset($stats['account_metrics_coverage']) && is_array($stats['account_metrics_coverage']))
-        ? $stats['account_metrics_coverage']
-        : [];
-    $coverage_total = isset($metrics_coverage['total_accounts']) ? (int) $metrics_coverage['total_accounts'] : 0;
-    if ($coverage_total > 0) {
-        $bw_matched = isset($metrics_coverage['bandwidth_matched']) ? (int) $metrics_coverage['bandwidth_matched'] : 0;
-        $inode_matched = isset($metrics_coverage['inode_matched']) ? (int) $metrics_coverage['inode_matched'] : 0;
-        $bw_missing = isset($metrics_coverage['bandwidth_missing_accounts']) && is_array($metrics_coverage['bandwidth_missing_accounts'])
-            ? $metrics_coverage['bandwidth_missing_accounts']
-            : [];
-        $inode_missing = isset($metrics_coverage['inode_missing_accounts']) && is_array($metrics_coverage['inode_missing_accounts'])
-            ? $metrics_coverage['inode_missing_accounts']
-            : [];
-        $bw_sources = isset($metrics_coverage['bandwidth_sources']) && is_array($metrics_coverage['bandwidth_sources'])
-            ? $metrics_coverage['bandwidth_sources']
-            : [];
-
-        if ($bw_matched === $coverage_total && $inode_matched === $coverage_total) {
-            $coverage_message = 'Account metrics coverage: bandwidth and inode data matched all ' . $coverage_total . ' cPanel accounts.';
-        } else {
-            $coverage_message = 'Account metrics coverage: bandwidth data matched ' . $bw_matched . ' of ' . $coverage_total . ' cPanel accounts';
-            if ($bw_matched < $coverage_total) {
-                $bw_missing_text = uptime_monitor_format_account_name_list($bw_missing, 3);
-                if ($bw_missing_text !== '') {
-                    $coverage_message .= ' (missing: ' . $bw_missing_text . ')';
-                }
-            }
-
-            $coverage_message .= '; inode data matched ' . $inode_matched . ' of ' . $coverage_total . ' cPanel accounts';
-            if ($inode_matched < $coverage_total) {
-                $inode_missing_text = uptime_monitor_format_account_name_list($inode_missing, 3);
-                if ($inode_missing_text !== '') {
-                    $coverage_message .= ' (missing: ' . $inode_missing_text . ')';
-                }
-            }
-            $coverage_message .= '. Accounts without matched metrics show as N/A in the cards below. This usually means the WHM API token is owner/reseller scoped. That is expected with least-privilege tokens; the plugin can only show bandwidth and inode metrics for accounts visible to this token.';
-        }
-
-        if (!empty($bw_sources)) {
-            $coverage_message .= ' Bandwidth sources used: ' . implode(', ', $bw_sources) . '.';
-        }
-
-        echo '<p class="uptime-monitor-disk-warning">' . esc_html($coverage_message) . '</p>';
-    }
-
     echo '<p class="uptime-monitor-disk-summary">';
     echo 'Total: <strong>' . esc_html(number_format($disk['total_gb'], 2)) . ' GB</strong> ';
     echo '| Used: <strong>' . esc_html(number_format($disk['used_gb'], 2)) . ' GB</strong> ';
@@ -1177,6 +1129,8 @@ function uptime_monitor_render_server_stats($stats) {
         $domain = isset($segment['domain']) ? trim((string) $segment['domain']) : '';
         $bandwidth_text = '';
         $inode_text = '';
+        $has_bandwidth_data = false;
+        $has_inode_data = false;
 
         if (isset($segment['type']) && $segment['type'] === 'account') {
             $bandwidth_used_mb = (isset($segment['bandwidth_used_mb']) && is_numeric($segment['bandwidth_used_mb']))
@@ -1192,8 +1146,15 @@ function uptime_monitor_render_server_stats($stats) {
                 ? (int) $segment['inodes_limit']
                 : null;
 
-            $bandwidth_text = uptime_monitor_format_bandwidth_summary($bandwidth_used_mb, $bandwidth_limit_mb);
-            $inode_text = uptime_monitor_format_inode_summary($inodes_used, $inodes_limit);
+            $has_bandwidth_data = ($bandwidth_used_mb !== null || $bandwidth_limit_mb !== null);
+            $has_inode_data = ($inodes_used !== null || $inodes_limit !== null);
+
+            if ($has_bandwidth_data) {
+                $bandwidth_text = uptime_monitor_format_bandwidth_summary($bandwidth_used_mb, $bandwidth_limit_mb);
+            }
+            if ($has_inode_data) {
+                $inode_text = uptime_monitor_format_inode_summary($inodes_used, $inodes_limit);
+            }
         }
 
         echo '<div class="uptime-monitor-disk-key-item" data-segment-id="' . esc_attr($segment['id']) . '" tabindex="0">';
@@ -1205,10 +1166,10 @@ function uptime_monitor_render_server_stats($stats) {
         }
         echo '<span class="uptime-monitor-disk-key-meta">' . esc_html($meta) . '</span>';
         if ($bandwidth_text !== '') {
-            echo '<span class="uptime-monitor-disk-key-meta">' . esc_html($bandwidth_text) . '</span>';
+            echo '<span class="uptime-monitor-disk-key-meta uptime-monitor-disk-key-meta-extra">' . esc_html($bandwidth_text) . '</span>';
         }
         if ($inode_text !== '') {
-            echo '<span class="uptime-monitor-disk-key-meta">' . esc_html($inode_text) . '</span>';
+            echo '<span class="uptime-monitor-disk-key-meta uptime-monitor-disk-key-meta-extra">' . esc_html($inode_text) . '</span>';
         }
         echo '</div>';
         echo '</div>';
@@ -1247,7 +1208,7 @@ function get_whm_account_list($whm_user, $whm_api_token, $server_url) {
     }
 
     if (empty($data['data']['acct'])) {
-        return 'No accounts found for this token scope or insufficient permissions.';
+        return 'No accounts found or insufficient permissions.';
     }
 
     return $data['data']['acct'];
@@ -1282,7 +1243,7 @@ function get_whm_account_bandwidth_usage($whm_user, $whm_api_token, $server_url)
     }
 
     if (empty($data['data']['acct']) || !is_array($data['data']['acct'])) {
-        return 'Account bandwidth usage data was not included in the WHM response. This can happen with owner/reseller-scoped tokens.';
+        return 'Account bandwidth usage data was not included in the WHM response.';
     }
 
     $bandwidth_by_user = [];
@@ -1494,7 +1455,7 @@ function get_whm_account_inode_usage($whm_user, $whm_api_token, $server_url) {
     }
 
     if (empty($data['data']['accounts']) || !is_array($data['data']['accounts'])) {
-        return 'Inode usage data was not included in the WHM response. This can happen with owner/reseller-scoped tokens.';
+        return 'Inode usage data was not included in the WHM response.';
     }
 
     $inode_by_user = [];
@@ -2091,6 +2052,14 @@ function uptime_monitor_enqueue_styles() {
             color: #50575e;
             line-height: 1.35;
             word-break: break-word;
+        }
+        .uptime-monitor-disk-key-meta-extra {
+            display: none;
+        }
+        .uptime-monitor-disk-key-item.is-hovered .uptime-monitor-disk-key-meta-extra,
+        .uptime-monitor-disk-key-item:hover .uptime-monitor-disk-key-meta-extra,
+        .uptime-monitor-disk-key-item:focus-visible .uptime-monitor-disk-key-meta-extra {
+            display: block;
         }
         .uptime-monitor-disk-visual.has-active .uptime-monitor-disk-segment:not(.is-hovered),
         .uptime-monitor-disk-visual.has-active .uptime-monitor-disk-key-item:not(.is-hovered) {
