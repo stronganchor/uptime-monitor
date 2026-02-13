@@ -81,7 +81,10 @@ function uptime_monitor_settings_page() {
 
     echo '<tr>';
     echo '<th scope="row"><label for="whm_api_token">WHM API Token</label></th>';
-    echo '<td><input type="text" id="whm_api_token" name="whm_api_token" value="' . esc_attr($whm_api_token) . '" class="regular-text"></td>';
+    echo '<td>';
+    echo '<input type="text" id="whm_api_token" name="whm_api_token" value="' . esc_attr($whm_api_token) . '" class="regular-text">';
+    echo '<p class="description">Recommended: use a least-privilege WHM token. Owner/reseller-scoped tokens are supported; accounts outside token scope will show bandwidth/inode metrics as N/A.</p>';
+    echo '</td>';
     echo '</tr>';
 
     echo '<tr>';
@@ -1132,7 +1135,7 @@ function uptime_monitor_render_server_stats($stats) {
                     $coverage_message .= ' (missing: ' . $inode_missing_text . ')';
                 }
             }
-            $coverage_message .= '. Accounts without matched metrics show as N/A in the cards below. This usually means the WHM API token has partial visibility (owner/reseller scope) rather than full-server visibility.';
+            $coverage_message .= '. Accounts without matched metrics show as N/A in the cards below. This usually means the WHM API token is owner/reseller scoped. That is expected with least-privilege tokens; the plugin can only show bandwidth and inode metrics for accounts visible to this token.';
         }
 
         if (!empty($bw_sources)) {
@@ -1244,7 +1247,7 @@ function get_whm_account_list($whm_user, $whm_api_token, $server_url) {
     }
 
     if (empty($data['data']['acct'])) {
-        return 'No accounts found or insufficient permissions.';
+        return 'No accounts found for this token scope or insufficient permissions.';
     }
 
     return $data['data']['acct'];
@@ -1279,7 +1282,7 @@ function get_whm_account_bandwidth_usage($whm_user, $whm_api_token, $server_url)
     }
 
     if (empty($data['data']['acct']) || !is_array($data['data']['acct'])) {
-        return 'Account bandwidth usage data was not included in the WHM response.';
+        return 'Account bandwidth usage data was not included in the WHM response. This can happen with owner/reseller-scoped tokens.';
     }
 
     $bandwidth_by_user = [];
@@ -1491,7 +1494,7 @@ function get_whm_account_inode_usage($whm_user, $whm_api_token, $server_url) {
     }
 
     if (empty($data['data']['accounts']) || !is_array($data['data']['accounts'])) {
-        return 'Inode usage data was not included in the WHM response.';
+        return 'Inode usage data was not included in the WHM response. This can happen with owner/reseller-scoped tokens.';
     }
 
     $inode_by_user = [];
