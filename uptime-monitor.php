@@ -3,7 +3,7 @@
 Plugin Name: Uptime Monitor
 Plugin URI: https://github.com/stronganchor/uptime-monitor/
 Description: A plugin to monitor URLs and report their HTTP status and display server stats.
-Version: 1.1.3
+Version: 1.1.5
 Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
 */
@@ -113,6 +113,11 @@ function get_whm_server_stats() {
     $stats = [
         'error'                  => '',
         'warning'                => '',
+        'load_warning'           => '',
+        'load_average'           => null,
+        'load_trend'             => [],
+        'cpu_cores'              => null,
+        'cpu_source'             => 'unknown',
         'server_disk'            => null,
         'total_accounts_used_mb' => 0.0,
         'accounts'               => [],
@@ -129,6 +134,20 @@ function get_whm_server_stats() {
         $stats['error'] = $accounts; // Return the error message
         return $stats;
     }
+
+    $cpu_info = uptime_monitor_get_cpu_core_info();
+    $stats['cpu_cores'] = $cpu_info['cores'];
+    $stats['cpu_source'] = $cpu_info['source'];
+
+    $load_average = get_whm_load_average($whm_user, $whm_api_token, $server_url);
+    if (is_array($load_average)) {
+        $stats['load_average'] = $load_average;
+        uptime_monitor_record_load_sample($load_average);
+    } else {
+        $stats['load_warning'] = (string) $load_average;
+    }
+
+    $stats['load_trend'] = uptime_monitor_get_load_trend_data(24 * HOUR_IN_SECONDS, 48);
 
     $total_account_disk_usage = 0.0;
     $accounts_data = [];
@@ -246,114 +265,580 @@ function uptime_monitor_format_mb($size_mb) {
     return number_format($size_mb, 0) . ' MB';
 }
 
-function uptime_monitor_render_usage_bar($used_pct, $used_label, $free_label, $show_free_segment = true) {
-    $used_pct = max(0.0, min(100.0, (float) $used_pct));
-    $free_pct = $show_free_segment ? max(0.0, 100.0 - $used_pct) : 0.0;
-
-    $used_style = 'width:' . number_format($used_pct, 2, '.', '') . '%;';
-    $free_style = 'width:' . number_format($free_pct, 2, '.', '') . '%;';
-
-    $output  = '<div class="uptime-monitor-usage-bar">';
-    $output .= '<span class="uptime-monitor-usage-segment uptime-monitor-usage-used" style="' . esc_attr($used_style) . '"></span>';
-    if ($show_free_segment) {
-        $output .= '<span class="uptime-monitor-usage-segment uptime-monitor-usage-free" style="' . esc_attr($free_style) . '"></span>';
+function uptime_monitor_parse_load_value($value) {
+    if (!is_scalar($value) || $value === '') {
+        return null;
     }
-    $output .= '</div>';
-    $output .= '<div class="uptime-monitor-usage-labels">';
-    $output .= '<span>Used: ' . esc_html($used_label) . '</span>';
-    $output .= '<span>Free: ' . esc_html($free_label) . '</span>';
-    $output .= '</div>';
 
-    return $output;
+    if (!is_numeric((string) $value)) {
+        return null;
+    }
+
+    return max(0.0, (float) $value);
+}
+
+function uptime_monitor_format_load_value($value) {
+    return ($value === null) ? 'N/A' : number_format((float) $value, 1);
+}
+
+function uptime_monitor_format_load_core_text($value, $cpu_cores) {
+    $cpu_cores = (int) $cpu_cores;
+    if ($cpu_cores <= 0 || $value === null) {
+        return '';
+    }
+
+    return '(' . uptime_monitor_format_load_value(((float) $value) / $cpu_cores) . '/core)';
+}
+
+function uptime_monitor_get_load_level($load_value, $cpu_cores = null) {
+    if ($load_value === null) {
+        return 'unknown';
+    }
+
+    $cpu_cores = (int) $cpu_cores;
+    if ($cpu_cores > 0) {
+        $load_per_core = $load_value / $cpu_cores;
+        if ($load_per_core < 0.70) {
+            return 'healthy';
+        }
+        if ($load_per_core < 1.00) {
+            return 'elevated';
+        }
+        return 'high';
+    }
+
+    if ($load_value < 2.0) {
+        return 'healthy';
+    }
+
+    if ($load_value < 4.0) {
+        return 'elevated';
+    }
+
+    return 'high';
+}
+
+function uptime_monitor_get_load_label($load_level) {
+    switch ($load_level) {
+        case 'healthy':
+            return 'Normal';
+        case 'elevated':
+            return 'Elevated';
+        case 'high':
+            return 'High';
+        default:
+            return 'Unknown';
+    }
+}
+
+function uptime_monitor_detect_cpu_cores() {
+    $cpuinfo = @file_get_contents('/proc/cpuinfo');
+    if (is_string($cpuinfo) && $cpuinfo !== '') {
+        $count = preg_match_all('/^processor\s*:/m', $cpuinfo, $matches);
+        if ($count > 0) {
+            return (int) $count;
+        }
+    }
+
+    $procstat = @file_get_contents('/proc/stat');
+    if (is_string($procstat) && $procstat !== '') {
+        $count = preg_match_all('/^cpu[0-9]+\s/m', $procstat, $matches);
+        if ($count > 0) {
+            return (int) $count;
+        }
+    }
+
+    return null;
+}
+
+function uptime_monitor_get_cpu_core_info() {
+    $manual_cores = absint(get_option('uptime_monitor_cpu_cores_override', 0));
+    if ($manual_cores > 0) {
+        return [
+            'cores'  => $manual_cores,
+            'source' => 'manual',
+        ];
+    }
+
+    $detected_cores = uptime_monitor_detect_cpu_cores();
+    if ($detected_cores !== null && $detected_cores > 0) {
+        return [
+            'cores'  => (int) $detected_cores,
+            'source' => 'auto',
+        ];
+    }
+
+    return [
+        'cores'  => null,
+        'source' => 'unknown',
+    ];
+}
+
+function uptime_monitor_record_load_sample($load_average, $min_interval_seconds = 300) {
+    if (!is_array($load_average)) {
+        return;
+    }
+
+    $sample_five = uptime_monitor_parse_load_value($load_average['five'] ?? null);
+    if ($sample_five === null) {
+        return;
+    }
+
+    $now = time();
+    $last_sample = (int) get_option('uptime_monitor_load_history_last', 0);
+    if ($min_interval_seconds > 0 && ($now - $last_sample) < $min_interval_seconds) {
+        return;
+    }
+
+    $history = get_option('uptime_monitor_load_history', []);
+    if (!is_array($history)) {
+        $history = [];
+    }
+
+    $history[] = [
+        't'       => $now,
+        'one'     => uptime_monitor_parse_load_value($load_average['one'] ?? null),
+        'five'    => $sample_five,
+        'fifteen' => uptime_monitor_parse_load_value($load_average['fifteen'] ?? null),
+    ];
+
+    $cutoff = $now - (7 * DAY_IN_SECONDS);
+    $history = array_values(array_filter($history, function($item) use ($cutoff) {
+        if (!is_array($item) || !isset($item['t'])) {
+            return false;
+        }
+        return ((int) $item['t']) >= $cutoff;
+    }));
+
+    if (count($history) > 4000) {
+        $history = array_slice($history, -4000);
+    }
+
+    update_option('uptime_monitor_load_history', $history);
+    update_option('uptime_monitor_load_history_last', $now);
+}
+
+function uptime_monitor_build_sparkline_points($values, $width = 180, $height = 28) {
+    if (!is_array($values) || count($values) < 2) {
+        return '';
+    }
+
+    $min = min($values);
+    $max = max($values);
+    $range = $max - $min;
+    if ($range < 0.0001) {
+        $range = 1.0;
+    }
+
+    $points = [];
+    $count = count($values);
+    foreach ($values as $index => $value) {
+        $x = $count > 1 ? (($index / ($count - 1)) * ($width - 1)) : 0.0;
+        $y = ($height - 1) - ((($value - $min) / $range) * ($height - 1));
+        $points[] = number_format($x, 2, '.', '') . ',' . number_format($y, 2, '.', '');
+    }
+
+    return implode(' ', $points);
+}
+
+function uptime_monitor_get_load_trend_data($window_seconds = DAY_IN_SECONDS, $target_points = 48) {
+    $trend = [
+        'has_data'         => false,
+        'window_label'     => round($window_seconds / HOUR_IN_SECONDS) . 'h',
+        'samples'          => 0,
+        'avg_five'         => null,
+        'peak_five'        => null,
+        'latest_five'      => null,
+        'delta_pct'        => null,
+        'sparkline_points' => '',
+    ];
+
+    $history = get_option('uptime_monitor_load_history', []);
+    if (!is_array($history) || empty($history)) {
+        return $trend;
+    }
+
+    $now = time();
+    $cutoff = $now - max(300, (int) $window_seconds);
+
+    $samples = [];
+    foreach ($history as $item) {
+        if (!is_array($item) || !isset($item['t'])) {
+            continue;
+        }
+
+        $ts = (int) $item['t'];
+        if ($ts < $cutoff || $ts > ($now + 60)) {
+            continue;
+        }
+
+        $five = uptime_monitor_parse_load_value($item['five'] ?? null);
+        if ($five === null) {
+            continue;
+        }
+
+        $samples[] = [
+            't'    => $ts,
+            'five' => $five,
+        ];
+    }
+
+    if (empty($samples)) {
+        return $trend;
+    }
+
+    usort($samples, function($a, $b) {
+        return ((int) $a['t']) <=> ((int) $b['t']);
+    });
+
+    $raw_values = array_column($samples, 'five');
+    $sample_count = count($raw_values);
+
+    $avg_five = array_sum($raw_values) / $sample_count;
+    $peak_five = max($raw_values);
+    $latest_five = $raw_values[$sample_count - 1];
+    $delta_pct = $avg_five > 0 ? (($latest_five - $avg_five) / $avg_five) * 100.0 : null;
+
+    $render_values = $raw_values;
+    $target_points = max(8, (int) $target_points);
+    if (count($render_values) > $target_points) {
+        $bucket_size = (int) ceil(count($render_values) / $target_points);
+        $downsampled = [];
+        for ($i = 0; $i < count($render_values); $i += $bucket_size) {
+            $chunk = array_slice($render_values, $i, $bucket_size);
+            if (!empty($chunk)) {
+                $downsampled[] = array_sum($chunk) / count($chunk);
+            }
+        }
+        $render_values = $downsampled;
+    }
+
+    $trend['has_data'] = count($render_values) > 1;
+    $trend['samples'] = $sample_count;
+    $trend['avg_five'] = $avg_five;
+    $trend['peak_five'] = $peak_five;
+    $trend['latest_five'] = $latest_five;
+    $trend['delta_pct'] = $delta_pct;
+    $trend['sparkline_points'] = uptime_monitor_build_sparkline_points($render_values, 180, 28);
+
+    return $trend;
+}
+
+function uptime_monitor_get_account_color($index) {
+    $palette = [
+        '#2563eb',
+        '#7c3aed',
+        '#db2777',
+        '#ea580c',
+        '#0ea5e9',
+        '#ca8a04',
+        '#dc2626',
+        '#8b5cf6',
+        '#0891b2',
+        '#be123c',
+        '#9333ea',
+        '#1d4ed8',
+        '#b91c1c',
+        '#c2410c',
+        '#4f46e5',
+        '#0284c7',
+    ];
+
+    return $palette[$index % count($palette)];
+}
+
+function uptime_monitor_compact_label($text, $max_length = 14) {
+    $text = trim((string) $text);
+    if ($text === '') {
+        return '';
+    }
+
+    if (strlen($text) <= $max_length) {
+        return $text;
+    }
+
+    return substr($text, 0, $max_length - 3) . '...';
+}
+
+function uptime_monitor_build_disk_graph_data($stats) {
+    $data = [
+        'segments' => [],
+        'note'     => '',
+    ];
+
+    if (empty($stats['server_disk']) || empty($stats['server_disk']['total_mb'])) {
+        return $data;
+    }
+
+    $disk = $stats['server_disk'];
+
+    $total_mb       = max(0.0001, (float) $disk['total_mb']);
+    $server_used_mb = max(0.0, min((float) $disk['used_mb'], $total_mb));
+    $free_mb        = max(0.0, $total_mb - $server_used_mb);
+
+    $accounts = isset($stats['accounts']) && is_array($stats['accounts']) ? $stats['accounts'] : [];
+
+    $raw_accounts_total_mb = 0.0;
+    foreach ($accounts as $account) {
+        $raw_accounts_total_mb += max(0.0, (float) $account['disk_used_mb']);
+    }
+
+    $account_target_mb = min($raw_accounts_total_mb, $server_used_mb);
+    $account_scale     = $raw_accounts_total_mb > 0 ? ($account_target_mb / $raw_accounts_total_mb) : 0.0;
+
+    $segments = [];
+
+    $segments[] = [
+        'id'          => 'server-used',
+        'type'        => 'system',
+        'name'        => 'Server (non-cPanel)',
+        'inline_name' => 'Server',
+        'mb'          => max(0.0, $server_used_mb - $account_target_mb),
+        'value_mb'    => max(0.0, $server_used_mb - $account_target_mb),
+        'color'       => '#334155',
+    ];
+
+    $account_index = 0;
+    foreach ($accounts as $account) {
+        $account_mb = max(0.0, (float) $account['disk_used_mb']);
+        if ($account_mb <= 0) {
+            continue;
+        }
+
+        $account_user = !empty($account['username']) ? (string) $account['username'] : '';
+        $name = $account_user !== '' ? $account_user : 'Account ' . ($account_index + 1);
+        $domain = !empty($account['domain']) ? $account['domain'] : '';
+        $scaled_mb = $account_mb * $account_scale;
+
+        $segments[] = [
+            'id'          => 'account-' . ($account_index + 1),
+            'type'        => 'account',
+            'name'        => $name,
+            'inline_name' => uptime_monitor_compact_label($name),
+            'domain'      => $domain,
+            'mb'          => $scaled_mb,
+            'value_mb'    => $account_mb,
+            'color'       => uptime_monitor_get_account_color($account_index),
+        ];
+        $account_index++;
+    }
+
+    $segments[] = [
+        'id'          => 'free-space',
+        'type'        => 'free',
+        'name'        => 'Free Space',
+        'inline_name' => 'Free',
+        'mb'          => $free_mb,
+        'value_mb'    => $free_mb,
+        'color'       => '#22c55e',
+    ];
+
+    $running_pct = 0.0;
+    $last_index  = count($segments) - 1;
+
+    foreach ($segments as $index => $segment) {
+        if ($index === $last_index) {
+            $pct = max(0.0, 100.0 - $running_pct);
+        } else {
+            $pct = max(0.0, min(100.0, ($segment['mb'] / $total_mb) * 100.0));
+            $running_pct += $pct;
+        }
+
+        $segments[$index]['pct'] = $pct;
+        $segments[$index]['show_inline_label'] = $pct >= 7.0;
+    }
+
+    if ($account_scale < 0.9999) {
+        $data['note'] = 'cPanel totals were larger than local server-used space, so account sections were normalized to fit the full disk line.';
+    }
+
+    $data['segments'] = $segments;
+    return $data;
 }
 
 function uptime_monitor_render_server_stats($stats) {
-    echo '<h2>Server Stats</h2>';
-
     if (!empty($stats['error'])) {
         echo '<p>' . esc_html($stats['error']) . '</p>';
         return;
     }
 
-    if (!empty($stats['warning'])) {
-        echo '<p>' . esc_html($stats['warning']) . '</p>';
+    $load_average = (isset($stats['load_average']) && is_array($stats['load_average'])) ? $stats['load_average'] : null;
+    $load_trend = (isset($stats['load_trend']) && is_array($stats['load_trend'])) ? $stats['load_trend'] : [];
+    $cpu_cores = isset($stats['cpu_cores']) ? (int) $stats['cpu_cores'] : 0;
+    $cpu_cores = $cpu_cores > 0 ? $cpu_cores : null;
+    $cpu_source = isset($stats['cpu_source']) ? sanitize_key($stats['cpu_source']) : 'unknown';
+    $manual_core_override = absint(get_option('uptime_monitor_cpu_cores_override', 0));
+
+    $load_one = $load_average ? uptime_monitor_parse_load_value($load_average['one'] ?? null) : null;
+    $load_five = $load_average ? uptime_monitor_parse_load_value($load_average['five'] ?? null) : null;
+    $load_fifteen = $load_average ? uptime_monitor_parse_load_value($load_average['fifteen'] ?? null) : null;
+    $load_level = uptime_monitor_get_load_level($load_five, $cpu_cores);
+
+    $trend_avg = isset($load_trend['avg_five']) ? uptime_monitor_parse_load_value($load_trend['avg_five']) : null;
+    $trend_peak = isset($load_trend['peak_five']) ? uptime_monitor_parse_load_value($load_trend['peak_five']) : null;
+    $trend_delta = isset($load_trend['delta_pct']) && is_numeric($load_trend['delta_pct']) ? (float) $load_trend['delta_pct'] : null;
+    $trend_has_graph = !empty($load_trend['has_data']) && !empty($load_trend['sparkline_points']);
+
+    $cpu_source_text = ($cpu_source === 'manual') ? 'manual' : (($cpu_source === 'auto') ? 'auto' : 'unknown');
+    $cpu_status_text = $cpu_cores ? ($cpu_cores . ' cores (' . $cpu_source_text . ')') : 'CPU cores unknown';
+    $cpu_input_value = $manual_core_override > 0 ? $manual_core_override : ($cpu_cores ?: '');
+
+    $load_warning_text = !empty($stats['load_warning']) ? (string) $stats['load_warning'] : '';
+    $trend_delta_text = '';
+    if ($trend_delta !== null) {
+        $delta_prefix = $trend_delta >= 0 ? '+' : '';
+        $trend_delta_text = $delta_prefix . number_format($trend_delta, 0) . '%';
     }
 
-    echo '<div class="uptime-monitor-stats-grid">';
+    echo '<div class="uptime-monitor-load-strip" role="group" aria-label="Server load averages" data-load-refresh="1">';
+    echo '<span class="uptime-monitor-load-label">Load Avg</span>';
+    echo '<span class="uptime-monitor-load-status uptime-monitor-load-status-' . esc_attr($load_level) . '" data-load-status>';
+    echo '<span class="uptime-monitor-load-dot" aria-hidden="true"></span>';
+    echo '<span class="uptime-monitor-load-status-text" data-load-status-text>' . esc_html(uptime_monitor_get_load_label($load_level)) . '</span>';
+    echo '</span>';
 
-    if (!empty($stats['server_disk'])) {
-        $disk = $stats['server_disk'];
-        echo '<div class="uptime-monitor-stat-card">';
-        echo '<h3>Server Disk Space</h3>';
-        echo uptime_monitor_render_usage_bar(
-            $disk['used_pct'],
-            number_format($disk['used_gb'], 2) . ' GB',
-            number_format($disk['free_gb'], 2) . ' GB'
-        );
-        echo '<p class="uptime-monitor-stat-meta">Total: ' . esc_html(number_format($disk['total_gb'], 2)) . ' GB</p>';
-        echo '</div>';
+    echo '<div class="uptime-monitor-load-metrics">';
 
-        $accounts_used_pct = min(100.0, ($stats['total_accounts_used_mb'] / $disk['total_mb']) * 100.0);
-        echo '<div class="uptime-monitor-stat-card">';
-        echo '<h3>cPanel Usage Total</h3>';
-        echo uptime_monitor_render_usage_bar(
-            $accounts_used_pct,
-            uptime_monitor_format_mb($stats['total_accounts_used_mb']),
-            uptime_monitor_format_mb(max(0.0, $disk['total_mb'] - $stats['total_accounts_used_mb']))
-        );
-        echo '<p class="uptime-monitor-stat-meta">Combined disk used by all cPanel accounts.</p>';
-        echo '</div>';
-    } else {
-        echo '<div class="uptime-monitor-stat-card">';
-        echo '<h3>Server Disk Space</h3>';
-        echo '<p class="uptime-monitor-stat-meta">Disk usage is currently unavailable.</p>';
+    $load_items = [
+        'one' => [
+            'label' => '1m',
+            'value' => $load_one,
+        ],
+        'five' => [
+            'label' => '5m',
+            'value' => $load_five,
+        ],
+        'fifteen' => [
+            'label' => '15m',
+            'value' => $load_fifteen,
+        ],
+    ];
+
+    foreach ($load_items as $key => $item) {
+        $label = $item['label'];
+        $value = $item['value'];
+        $value_level = uptime_monitor_get_load_level($value, $cpu_cores);
+        $value_text = uptime_monitor_format_load_value($value);
+        $core_text = uptime_monitor_format_load_core_text($value, $cpu_cores);
+        $core_class = $core_text === '' ? 'uptime-monitor-load-pill-core is-hidden' : 'uptime-monitor-load-pill-core';
+
+        echo '<span class="uptime-monitor-load-pill uptime-monitor-load-pill-' . esc_attr($value_level) . '" data-load-pill="' . esc_attr($key) . '">';
+        echo '<span class="uptime-monitor-load-pill-label">' . esc_html($label) . '</span>';
+        echo '<span class="uptime-monitor-load-pill-value">' . esc_html($value_text) . '</span>';
+        echo '<span class="' . esc_attr($core_class) . '" data-load-pill-core>' . esc_html($core_text) . '</span>';
+        echo '</span>';
+    }
+
+    $trend_avg_hidden = $trend_avg === null ? ' style="display:none;"' : '';
+    echo '<span class="uptime-monitor-load-pill" data-load-pill="trend_avg"' . $trend_avg_hidden . '>';
+        echo '<span class="uptime-monitor-load-pill-label">24h avg</span>';
+    echo '<span class="uptime-monitor-load-pill-value">' . esc_html(uptime_monitor_format_load_value($trend_avg)) . '</span>';
+    echo '</span>';
+
+    $trend_peak_hidden = $trend_peak === null ? ' style="display:none;"' : '';
+    echo '<span class="uptime-monitor-load-pill" data-load-pill="trend_peak"' . $trend_peak_hidden . '>';
+        echo '<span class="uptime-monitor-load-pill-label">24h peak</span>';
+    echo '<span class="uptime-monitor-load-pill-value">' . esc_html(uptime_monitor_format_load_value($trend_peak)) . '</span>';
+    echo '</span>';
+
+    echo '</div>';
+
+    $trend_window_label = !empty($load_trend['window_label']) ? (string) $load_trend['window_label'] : '24h';
+    $trend_title = $trend_window_label . ' trend (5m load)';
+    $trend_style = $trend_has_graph ? '' : ' style="display:none;"';
+    echo '<div class="uptime-monitor-load-trend uptime-monitor-load-trend-' . esc_attr($load_level) . '" data-load-trend title="' . esc_attr($trend_title) . '"' . $trend_style . '>';
+    echo '<span class="uptime-monitor-load-trend-label" data-load-window-label>' . esc_html($trend_window_label) . '</span>';
+    echo '<svg class="uptime-monitor-load-sparkline" viewBox="0 0 180 28" role="img" aria-label="' . esc_attr($trend_title) . '" data-load-trend-svg>';
+    echo '<polyline points="' . esc_attr($trend_has_graph ? $load_trend['sparkline_points'] : '') . '" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" data-load-trend-line></polyline>';
+    echo '</svg>';
+    $delta_style = $trend_delta_text === '' ? ' style="display:none;"' : '';
+    echo '<span class="uptime-monitor-load-trend-delta" data-load-delta' . $delta_style . '>' . esc_html($trend_delta_text) . '</span>';
+    echo '</div>';
+
+    echo '<span class="uptime-monitor-load-cpu" data-load-cpu>' . esc_html($cpu_status_text) . '</span>';
+
+    echo '<form method="post" action="' . esc_url(admin_url('admin.php?page=uptime-monitor')) . '" class="uptime-monitor-core-form">';
+    wp_nonce_field('uptime_monitor_save_cpu_cores', 'uptime_monitor_save_cpu_cores_nonce');
+    echo '<label for="uptime-monitor-cpu-cores-input" class="screen-reader-text">CPU cores override</label>';
+    echo '<input id="uptime-monitor-cpu-cores-input" type="number" min="1" step="1" name="cpu_cores_override" value="' . esc_attr($cpu_input_value) . '" class="small-text">';
+    echo '<button type="submit" name="save_cpu_cores" class="button button-secondary button-small">Save Cores</button>';
+    if ($manual_core_override > 0) {
+        echo '<button type="submit" name="clear_cpu_cores" class="button button-link-delete button-small">Auto</button>';
+    }
+    echo '</form>';
+
+    $warning_class = 'uptime-monitor-load-warning';
+    if ($load_warning_text === '') {
+        $warning_class .= ' is-hidden';
+    }
+    echo '<span class="' . esc_attr($warning_class) . '" data-load-warning>' . esc_html($load_warning_text) . '</span>';
+
+    echo '</div>';
+
+    echo '<h2>Server Disk Usage</h2>';
+
+    if (empty($stats['server_disk']) || empty($stats['server_disk']['total_gb'])) {
+        echo '<p>Server disk usage is currently unavailable.</p>';
+        return;
+    }
+
+    $disk = $stats['server_disk'];
+    $graph_data = uptime_monitor_build_disk_graph_data($stats);
+    $segments = $graph_data['segments'];
+
+    if (!empty($stats['warning'])) {
+        echo '<p class="uptime-monitor-disk-warning">' . esc_html($stats['warning']) . '</p>';
+    }
+
+    echo '<p class="uptime-monitor-disk-summary">';
+    echo 'Total: <strong>' . esc_html(number_format($disk['total_gb'], 2)) . ' GB</strong> ';
+    echo '| Used: <strong>' . esc_html(number_format($disk['used_gb'], 2)) . ' GB</strong> ';
+    echo '| Free: <strong>' . esc_html(number_format($disk['free_gb'], 2)) . ' GB</strong>';
+    echo '</p>';
+
+    echo '<div class="uptime-monitor-disk-visual">';
+    echo '<div class="uptime-monitor-disk-line" role="img" aria-label="Server disk usage breakdown">';
+
+    foreach ($segments as $segment) {
+        if ($segment['pct'] <= 0) {
+            continue;
+        }
+
+        $segment_style = 'width:' . number_format($segment['pct'], 4, '.', '') . '%;background:' . $segment['color'] . ';';
+        $segment_title = $segment['name'] . ': ' . uptime_monitor_format_mb($segment['value_mb']) . ' (' . number_format($segment['pct'], 1) . '%)';
+
+        echo '<div class="uptime-monitor-disk-segment uptime-monitor-disk-segment-' . esc_attr($segment['type']) . '" data-segment-id="' . esc_attr($segment['id']) . '" style="' . esc_attr($segment_style) . '" title="' . esc_attr($segment_title) . '">';
+        if (!empty($segment['show_inline_label'])) {
+            echo '<span class="uptime-monitor-disk-segment-label">' . esc_html($segment['inline_name']) . '</span>';
+        }
         echo '</div>';
     }
 
     echo '</div>';
+    echo '<div class="uptime-monitor-disk-key">';
 
-    echo '<h3>cPanel Account Disk Usage</h3>';
-    echo '<table class="widefat striped uptime-monitor-account-usage-table">';
-    echo '<thead><tr><th>Account</th><th>Domain</th><th>Usage</th><th>Quota</th><th>Status</th></tr></thead>';
-    echo '<tbody>';
+    foreach ($segments as $segment) {
+        $meta = uptime_monitor_format_mb($segment['value_mb']) . ' (' . number_format($segment['pct'], 1) . '%)';
+        $domain = isset($segment['domain']) ? trim((string) $segment['domain']) : '';
 
-    if (empty($stats['accounts'])) {
-        echo '<tr><td colspan="5">No cPanel accounts found.</td></tr>';
-    } else {
-        foreach ($stats['accounts'] as $account) {
-            $account_name = !empty($account['username']) ? $account['username'] : 'N/A';
-            $domain       = !empty($account['domain']) ? $account['domain'] : 'N/A';
-            $status       = $account['suspended'] === 'Yes' ? 'Suspended' : 'Active';
-
-            if (!empty($account['disk_limit_mb']) && $account['disk_limit_mb'] > 0) {
-                $usage_bar = uptime_monitor_render_usage_bar(
-                    $account['disk_used_pct'],
-                    uptime_monitor_format_mb($account['disk_used_mb']),
-                    uptime_monitor_format_mb($account['disk_free_mb'])
-                );
-                $quota_label = uptime_monitor_format_mb($account['disk_limit_mb']);
-            } else {
-                $usage_bar = uptime_monitor_render_usage_bar(
-                    100,
-                    uptime_monitor_format_mb($account['disk_used_mb']),
-                    'Unlimited quota',
-                    false
-                );
-                $quota_label = 'Unlimited';
-            }
-
-            echo '<tr>';
-            echo '<td>' . esc_html($account_name) . '</td>';
-            echo '<td>' . esc_html($domain) . '</td>';
-            echo '<td class="uptime-monitor-account-usage-cell">' . $usage_bar . '</td>';
-            echo '<td>' . esc_html($quota_label) . '</td>';
-            echo '<td>' . esc_html($status) . '</td>';
-            echo '</tr>';
+        echo '<div class="uptime-monitor-disk-key-item" data-segment-id="' . esc_attr($segment['id']) . '" tabindex="0">';
+        echo '<span class="uptime-monitor-disk-key-swatch" style="background:' . esc_attr($segment['color']) . ';"></span>';
+        echo '<div class="uptime-monitor-disk-key-text">';
+        echo '<span class="uptime-monitor-disk-key-name">' . esc_html($segment['name']) . '</span>';
+        if ($domain !== '') {
+            echo '<span class="uptime-monitor-disk-key-domain">' . esc_html($domain) . '</span>';
         }
+        echo '<span class="uptime-monitor-disk-key-meta">' . esc_html($meta) . '</span>';
+        echo '</div>';
+        echo '</div>';
     }
 
-    echo '</tbody>';
-    echo '</table>';
+    echo '</div>';
+    echo '</div>';
+
+    if (!empty($graph_data['note'])) {
+        echo '<p class="uptime-monitor-disk-note">' . esc_html($graph_data['note']) . '</p>';
+    }
 }
 
 function get_whm_account_list($whm_user, $whm_api_token, $server_url) {
@@ -387,6 +872,138 @@ function get_whm_account_list($whm_user, $whm_api_token, $server_url) {
     return $data['data']['acct'];
 }
 
+function get_whm_load_average($whm_user, $whm_api_token, $server_url) {
+    $query = rtrim($server_url, '/') . '/json-api/systemloadavg?api.version=1';
+
+    $curl = curl_init();
+    curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, 0); // For development; consider enabling in production
+    curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, 0); // For development; consider enabling in production
+    curl_setopt($curl, CURLOPT_RETURNTRANSFER, 1);
+    curl_setopt($curl, CURLOPT_HTTPHEADER, ['Authorization: whm ' . $whm_user . ':' . $whm_api_token]);
+    curl_setopt($curl, CURLOPT_URL, $query);
+
+    $result = curl_exec($curl);
+
+    if (curl_errno($curl)) {
+        return 'Unable to retrieve load averages from WHM: ' . curl_error($curl);
+    }
+
+    curl_close($curl);
+
+    $data = json_decode($result, true);
+    if (!is_array($data)) {
+        return 'Unable to retrieve load averages from WHM (invalid API response).';
+    }
+
+    if (isset($data['metadata']['result']) && (int) $data['metadata']['result'] === 0) {
+        $reason = isset($data['metadata']['reason']) ? (string) $data['metadata']['reason'] : 'Unknown error';
+        return 'Unable to retrieve load averages from WHM: ' . $reason;
+    }
+
+    if (empty($data['data']) || !is_array($data['data'])) {
+        return 'Load average data was not included in the WHM response.';
+    }
+
+    return [
+        'one'     => uptime_monitor_parse_load_value($data['data']['one'] ?? null),
+        'five'    => uptime_monitor_parse_load_value($data['data']['five'] ?? null),
+        'fifteen' => uptime_monitor_parse_load_value($data['data']['fifteen'] ?? null),
+    ];
+}
+
+function uptime_monitor_ajax_get_live_load() {
+    if (!current_user_can('manage_options')) {
+        wp_send_json_error(['message' => 'You do not have permission to view this data.'], 403);
+    }
+
+    check_ajax_referer('uptime_monitor_live_load', 'nonce');
+
+    $whm_user      = get_option('uptime_monitor_whm_user');
+    $whm_api_token = get_option('uptime_monitor_whm_api_token');
+    $server_url    = get_option('uptime_monitor_whm_server_url');
+
+    if (empty($whm_user) || empty($whm_api_token) || empty($server_url)) {
+        wp_send_json_error(['message' => 'WHM credentials are not configured.']);
+    }
+
+    $cpu_info = uptime_monitor_get_cpu_core_info();
+    $cpu_cores = isset($cpu_info['cores']) ? (int) $cpu_info['cores'] : 0;
+    $cpu_cores = $cpu_cores > 0 ? $cpu_cores : null;
+
+    $load_average = get_whm_load_average($whm_user, $whm_api_token, $server_url);
+    if (!is_array($load_average)) {
+        wp_send_json_error(['message' => (string) $load_average]);
+    }
+
+    uptime_monitor_record_load_sample($load_average, 55);
+
+    $load_one = uptime_monitor_parse_load_value($load_average['one'] ?? null);
+    $load_five = uptime_monitor_parse_load_value($load_average['five'] ?? null);
+    $load_fifteen = uptime_monitor_parse_load_value($load_average['fifteen'] ?? null);
+
+    $load_level = uptime_monitor_get_load_level($load_five, $cpu_cores);
+    $trend = uptime_monitor_get_load_trend_data(24 * HOUR_IN_SECONDS, 48);
+    $trend_has_graph = !empty($trend['has_data']) && !empty($trend['sparkline_points']);
+    $trend_window_label = !empty($trend['window_label']) ? (string) $trend['window_label'] : '24h';
+
+    $trend_delta = isset($trend['delta_pct']) && is_numeric($trend['delta_pct']) ? (float) $trend['delta_pct'] : null;
+    $trend_delta_text = '';
+    if ($trend_delta !== null) {
+        $delta_prefix = $trend_delta >= 0 ? '+' : '';
+        $trend_delta_text = $delta_prefix . number_format($trend_delta, 0) . '%';
+    }
+
+    $cpu_source = isset($cpu_info['source']) ? sanitize_key($cpu_info['source']) : 'unknown';
+    $cpu_source_text = ($cpu_source === 'manual') ? 'manual' : (($cpu_source === 'auto') ? 'auto' : 'unknown');
+    $cpu_status_text = $cpu_cores ? ($cpu_cores . ' cores (' . $cpu_source_text . ')') : 'CPU cores unknown';
+
+    wp_send_json_success([
+        'status' => [
+            'level' => $load_level,
+            'label' => uptime_monitor_get_load_label($load_level),
+        ],
+        'metrics' => [
+            'one' => [
+                'display' => uptime_monitor_format_load_value($load_one),
+                'level'   => uptime_monitor_get_load_level($load_one, $cpu_cores),
+                'core_display' => uptime_monitor_format_load_core_text($load_one, $cpu_cores),
+            ],
+            'five' => [
+                'display' => uptime_monitor_format_load_value($load_five),
+                'level'   => uptime_monitor_get_load_level($load_five, $cpu_cores),
+                'core_display' => uptime_monitor_format_load_core_text($load_five, $cpu_cores),
+            ],
+            'fifteen' => [
+                'display' => uptime_monitor_format_load_value($load_fifteen),
+                'level'   => uptime_monitor_get_load_level($load_fifteen, $cpu_cores),
+                'core_display' => uptime_monitor_format_load_core_text($load_fifteen, $cpu_cores),
+            ],
+            'trend_avg' => [
+                'display' => uptime_monitor_format_load_value($trend['avg_five'] ?? null),
+                'level'   => uptime_monitor_get_load_level($trend['avg_five'] ?? null, $cpu_cores),
+                'hidden'  => !isset($trend['avg_five']) || $trend['avg_five'] === null,
+            ],
+            'trend_peak' => [
+                'display' => uptime_monitor_format_load_value($trend['peak_five'] ?? null),
+                'level'   => uptime_monitor_get_load_level($trend['peak_five'] ?? null, $cpu_cores),
+                'hidden'  => !isset($trend['peak_five']) || $trend['peak_five'] === null,
+            ],
+        ],
+        'trend' => [
+            'has_graph'       => $trend_has_graph,
+            'window_label'    => $trend_window_label,
+            'title'           => $trend_window_label . ' trend (5m load)',
+            'sparkline_points'=> $trend_has_graph ? (string) $trend['sparkline_points'] : '',
+            'delta_text'      => $trend_delta_text,
+        ],
+        'cpu' => [
+            'text' => $cpu_status_text,
+        ],
+        'warning' => '',
+    ]);
+}
+add_action('wp_ajax_uptime_monitor_get_live_load', 'uptime_monitor_ajax_get_live_load');
+
 // Step 4: Display server stats at the top of the Uptime Monitor page
 function uptime_monitor_page() {
     if (!current_user_can('manage_options')) {
@@ -395,6 +1012,23 @@ function uptime_monitor_page() {
 
     echo '<div class="wrap">';
     echo '<h1>Uptime Monitor</h1>';
+
+    if (isset($_POST['save_cpu_cores']) || isset($_POST['clear_cpu_cores'])) {
+        check_admin_referer('uptime_monitor_save_cpu_cores', 'uptime_monitor_save_cpu_cores_nonce');
+
+        if (isset($_POST['clear_cpu_cores'])) {
+            delete_option('uptime_monitor_cpu_cores_override');
+            echo '<div class="notice notice-success"><p>CPU core override cleared. Auto-detection is now enabled.</p></div>';
+        } else {
+            $cpu_cores_override = isset($_POST['cpu_cores_override']) ? absint(wp_unslash($_POST['cpu_cores_override'])) : 0;
+            if ($cpu_cores_override > 0) {
+                update_option('uptime_monitor_cpu_cores_override', $cpu_cores_override);
+                echo '<div class="notice notice-success"><p>CPU core override saved.</p></div>';
+            } else {
+                echo '<div class="notice notice-error"><p>Please enter a valid CPU core count greater than zero.</p></div>';
+            }
+        }
+    }
 
     // Fetch and display the server stats
     $server_stats = get_whm_server_stats();
@@ -537,66 +1171,553 @@ function uptime_monitor_page() {
 }
 
 function uptime_monitor_enqueue_styles() {
+    $page = isset($_GET['page']) ? sanitize_key(wp_unslash($_GET['page'])) : '';
+    if ($page !== 'uptime-monitor') {
+        return;
+    }
+
     echo '<style>
         .error {
             color: red !important;
             font-weight: bold;
         }
-        .uptime-monitor-stats-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-            gap: 16px;
-            margin: 12px 0 18px;
+        .uptime-monitor-disk-summary {
+            margin: 8px 0 10px;
         }
-        .uptime-monitor-stat-card {
-            background: #fff;
+        .uptime-monitor-load-strip {
+            margin: 10px 0 10px;
+            padding: 8px 10px;
+            border: 1px solid #dcdcde;
+            border-radius: 10px;
+            background: #ffffff;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: nowrap;
+            overflow-x: auto;
+        }
+        .uptime-monitor-load-label {
+            font-size: 11px;
+            font-weight: 700;
+            color: #50575e;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+        }
+        .uptime-monitor-load-status {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 8px;
+            border-radius: 999px;
+            border: 1px solid transparent;
+            font-size: 12px;
+            font-weight: 600;
+            line-height: 1;
+        }
+        .uptime-monitor-load-status-healthy {
+            color: #166534;
+            background: #ecfdf3;
+            border-color: #86efac;
+        }
+        .uptime-monitor-load-status-elevated {
+            color: #9a3412;
+            background: #fff7ed;
+            border-color: #fdba74;
+        }
+        .uptime-monitor-load-status-high {
+            color: #991b1b;
+            background: #fef2f2;
+            border-color: #fca5a5;
+        }
+        .uptime-monitor-load-status-unknown {
+            color: #374151;
+            background: #f3f4f6;
+            border-color: #d1d5db;
+        }
+        .uptime-monitor-load-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 999px;
+            background: currentColor;
+            opacity: 0.9;
+        }
+        .uptime-monitor-load-metrics {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex-wrap: nowrap;
+        }
+        .uptime-monitor-load-pill {
+            min-width: 100px;
+            padding: 4px 6px;
+            border: 1px solid #dcdcde;
+            border-radius: 7px;
+            background: #f6f7f7;
+            text-align: center;
+            line-height: 1.1;
+            flex: 0 0 auto;
+        }
+        .uptime-monitor-load-pill-label {
+            display: block;
+            font-size: 10px;
+            color: #646970;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        .uptime-monitor-load-pill-value {
+            display: block;
+            margin-top: 2px;
+            font-size: 13px;
+            font-weight: 700;
+            color: #1d2327;
+            line-height: 1.2;
+        }
+        .uptime-monitor-load-pill-core {
+            display: block;
+            margin-top: 1px;
+            font-size: 10px;
+            color: #50575e;
+            line-height: 1.2;
+            white-space: nowrap;
+        }
+        .uptime-monitor-load-pill-core.is-hidden {
+            display: none;
+        }
+        .uptime-monitor-load-pill-elevated .uptime-monitor-load-pill-value {
+            color: #9a3412;
+        }
+        .uptime-monitor-load-pill-high .uptime-monitor-load-pill-value {
+            color: #991b1b;
+        }
+        .uptime-monitor-load-trend {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 3px 6px;
             border: 1px solid #dcdcde;
             border-radius: 8px;
-            padding: 14px;
+            background: #f8fafc;
+            flex: 0 0 auto;
         }
-        .uptime-monitor-stat-card h3 {
-            margin: 0 0 10px;
+        .uptime-monitor-load-trend-label {
+            font-size: 10px;
+            color: #646970;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            line-height: 1;
         }
-        .uptime-monitor-stat-meta {
-            margin: 8px 0 0;
-            color: #50575e;
-        }
-        .uptime-monitor-usage-bar {
-            display: flex;
-            width: 100%;
-            height: 16px;
-            border: 1px solid #dcdcde;
-            border-radius: 999px;
-            overflow: hidden;
-            background: #f0f0f1;
-        }
-        .uptime-monitor-usage-segment {
+        .uptime-monitor-load-sparkline {
+            width: 180px;
+            height: 28px;
             display: block;
-            height: 100%;
         }
-        .uptime-monitor-usage-used {
-            background: #d63638;
+        .uptime-monitor-load-trend polyline {
+            stroke: #1d4ed8;
         }
-        .uptime-monitor-usage-free {
-            background: #00a32a;
+        .uptime-monitor-load-trend-elevated polyline {
+            stroke: #ea580c;
         }
-        .uptime-monitor-usage-labels {
-            display: flex;
-            justify-content: space-between;
-            gap: 10px;
-            margin-top: 6px;
+        .uptime-monitor-load-trend-high polyline {
+            stroke: #dc2626;
+        }
+        .uptime-monitor-load-trend-delta {
+            font-size: 11px;
+            font-weight: 600;
+            color: #50575e;
+            line-height: 1;
+        }
+        .uptime-monitor-load-cpu {
             font-size: 12px;
             color: #50575e;
+            white-space: nowrap;
+            margin-left: auto;
         }
-        .uptime-monitor-account-usage-table td {
-            vertical-align: middle;
+        .uptime-monitor-core-form {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            margin: 0;
+            white-space: nowrap;
+            flex: 0 0 auto;
         }
-        .uptime-monitor-account-usage-cell {
-            min-width: 260px;
+        .uptime-monitor-core-form .small-text {
+            width: 58px;
+            min-height: 28px;
+        }
+        .uptime-monitor-core-form .button-small {
+            min-height: 28px;
+            line-height: 26px;
+            padding: 0 10px;
+        }
+        .uptime-monitor-load-warning {
+            margin: 0 0 0 6px;
+            font-size: 12px;
+            color: #50575e;
+            white-space: nowrap;
+        }
+        .uptime-monitor-load-warning.is-hidden {
+            display: none;
+        }
+        .uptime-monitor-disk-warning,
+        .uptime-monitor-disk-note {
+            margin: 10px 0;
+            color: #50575e;
+        }
+        .uptime-monitor-disk-visual {
+            margin: 12px 0 18px;
+        }
+        .uptime-monitor-disk-line {
+            display: flex;
+            width: 100%;
+            height: 42px;
+            border: 1px solid #c3c4c7;
+            border-radius: 999px;
+            overflow: hidden;
+            background: #f6f7f7;
+            box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.08);
+        }
+        .uptime-monitor-disk-segment {
+            position: relative;
+            min-width: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: opacity 160ms ease, transform 160ms ease, box-shadow 160ms ease;
+        }
+        .uptime-monitor-disk-segment-label {
+            display: block;
+            max-width: 100%;
+            padding: 0 10px;
+            overflow: hidden;
+            white-space: nowrap;
+            text-overflow: ellipsis;
+            font-size: 12px;
+            font-weight: 600;
+            color: #ffffff;
+            text-shadow: 0 1px 1px rgba(0, 0, 0, 0.35);
+        }
+        .uptime-monitor-disk-key {
+            margin-top: 12px;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 8px;
+        }
+        .uptime-monitor-disk-key-item {
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            padding: 8px 10px;
+            background: #ffffff;
+            border: 1px solid #dcdcde;
+            border-radius: 8px;
+            outline: none;
+            transition: opacity 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+        }
+        .uptime-monitor-disk-key-swatch {
+            width: 12px;
+            height: 12px;
+            border-radius: 999px;
+            flex: 0 0 auto;
+            margin-top: 3px;
+        }
+        .uptime-monitor-disk-key-text {
+            display: block;
+            min-width: 0;
+        }
+        .uptime-monitor-disk-key-name {
+            display: block;
+            font-weight: 600;
+            color: #1d2327;
+            line-height: 1.3;
+        }
+        .uptime-monitor-disk-key-domain,
+        .uptime-monitor-disk-key-meta {
+            display: block;
+            font-size: 12px;
+            color: #50575e;
+            line-height: 1.35;
+            word-break: break-word;
+        }
+        .uptime-monitor-disk-visual.has-active .uptime-monitor-disk-segment:not(.is-hovered),
+        .uptime-monitor-disk-visual.has-active .uptime-monitor-disk-key-item:not(.is-hovered) {
+            opacity: 0.32;
+        }
+        .uptime-monitor-disk-segment.is-hovered {
+            z-index: 1;
+            box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.85);
+            transform: scaleY(1.03);
+        }
+        .uptime-monitor-disk-key-item.is-hovered {
+            border-color: #1d4ed8;
+            box-shadow: 0 0 0 1px #1d4ed8;
+        }
+        .uptime-monitor-disk-key-item:focus-visible {
+            border-color: #1d4ed8;
+            box-shadow: 0 0 0 2px rgba(29, 78, 216, 0.3);
+        }
+        @media (max-width: 782px) {
+            .uptime-monitor-load-strip {
+                flex-wrap: wrap;
+                overflow-x: visible;
+            }
+            .uptime-monitor-load-metrics {
+                flex-wrap: wrap;
+            }
+            .uptime-monitor-load-cpu {
+                margin-left: 0;
+                width: 100%;
+            }
+            .uptime-monitor-load-warning {
+                width: 100%;
+                margin-left: 0;
+                white-space: normal;
+            }
+            .uptime-monitor-load-sparkline {
+                width: 130px;
+            }
         }
     </style>';
 }
 add_action('admin_head', 'uptime_monitor_enqueue_styles');
+
+function uptime_monitor_enqueue_disk_graph_script() {
+    $page = isset($_GET['page']) ? sanitize_key(wp_unslash($_GET['page'])) : '';
+    if ($page !== 'uptime-monitor') {
+        return;
+    }
+
+    $ajax_url = wp_json_encode(admin_url('admin-ajax.php'));
+    $load_nonce = wp_json_encode(wp_create_nonce('uptime_monitor_live_load'));
+
+    echo '<script>
+    (function() {
+        var root = document.querySelector(".uptime-monitor-disk-visual");
+        if (!root) {
+            return;
+        }
+
+        var segments = root.querySelectorAll(".uptime-monitor-disk-segment[data-segment-id]");
+        var keyItems = root.querySelectorAll(".uptime-monitor-disk-key-item[data-segment-id]");
+
+        if (!segments.length || !keyItems.length) {
+            return;
+        }
+
+        var clearAll = function() {
+            root.classList.remove("has-active");
+            segments.forEach(function(segment) {
+                segment.classList.remove("is-hovered");
+            });
+            keyItems.forEach(function(item) {
+                item.classList.remove("is-hovered");
+            });
+        };
+
+        var setActive = function(segmentId) {
+            root.classList.add("has-active");
+            segments.forEach(function(segment) {
+                segment.classList.toggle("is-hovered", segment.getAttribute("data-segment-id") === segmentId);
+            });
+            keyItems.forEach(function(item) {
+                item.classList.toggle("is-hovered", item.getAttribute("data-segment-id") === segmentId);
+            });
+        };
+
+        var bindNodes = function(nodes) {
+            nodes.forEach(function(node) {
+                var segmentId = node.getAttribute("data-segment-id");
+                if (!segmentId) {
+                    return;
+                }
+                node.addEventListener("mouseenter", function() {
+                    setActive(segmentId);
+                });
+                node.addEventListener("focus", function() {
+                    setActive(segmentId);
+                });
+            });
+        };
+
+        bindNodes(segments);
+        bindNodes(keyItems);
+
+        root.addEventListener("mouseleave", clearAll);
+        root.addEventListener("focusout", function(event) {
+            if (!root.contains(event.relatedTarget)) {
+                clearAll();
+            }
+        });
+    })();
+    </script>';
+
+    echo '<script>
+    (function() {
+        var strip = document.querySelector(".uptime-monitor-load-strip[data-load-refresh=\"1\"]");
+        if (!strip) {
+            return;
+        }
+
+        var ajaxUrl = ' . $ajax_url . ';
+        var ajaxNonce = ' . $load_nonce . ';
+        var refreshMs = 60000;
+        var inFlight = false;
+        var levels = ["healthy", "elevated", "high", "unknown"];
+
+        var setLevelClass = function(node, prefix, level) {
+            if (!node) {
+                return;
+            }
+            levels.forEach(function(item) {
+                node.classList.remove(prefix + "-" + item);
+            });
+            node.classList.add(prefix + "-" + (level || "unknown"));
+        };
+
+        var updateMetric = function(key, data) {
+            var pill = strip.querySelector("[data-load-pill=\"" + key + "\"]");
+            if (!pill || !data) {
+                return;
+            }
+
+            if (typeof data.hidden === "boolean") {
+                pill.style.display = data.hidden ? "none" : "";
+            }
+
+            setLevelClass(pill, "uptime-monitor-load-pill", data.level || "unknown");
+
+            var valueNode = pill.querySelector(".uptime-monitor-load-pill-value");
+            if (valueNode) {
+                valueNode.textContent = data.display || "N/A";
+            }
+
+            var coreNode = pill.querySelector("[data-load-pill-core]");
+            if (coreNode) {
+                var coreText = data.core_display || "";
+                coreNode.textContent = coreText;
+                coreNode.classList.toggle("is-hidden", !coreText);
+            }
+        };
+
+        var applyPayload = function(data) {
+            if (!data) {
+                return;
+            }
+
+            var statusNode = strip.querySelector("[data-load-status]");
+            var statusTextNode = strip.querySelector("[data-load-status-text]");
+            var statusLevel = data.status && data.status.level ? data.status.level : "unknown";
+            var statusLabel = data.status && data.status.label ? data.status.label : "Unknown";
+
+            setLevelClass(statusNode, "uptime-monitor-load-status", statusLevel);
+            if (statusTextNode) {
+                statusTextNode.textContent = statusLabel;
+            }
+
+            if (data.metrics) {
+                updateMetric("one", data.metrics.one);
+                updateMetric("five", data.metrics.five);
+                updateMetric("fifteen", data.metrics.fifteen);
+                updateMetric("trend_avg", data.metrics.trend_avg);
+                updateMetric("trend_peak", data.metrics.trend_peak);
+            }
+
+            var trendNode = strip.querySelector("[data-load-trend]");
+            var trendLabelNode = strip.querySelector("[data-load-window-label]");
+            var trendLineNode = strip.querySelector("[data-load-trend-line]");
+            var trendSvgNode = strip.querySelector("[data-load-trend-svg]");
+            var trendDeltaNode = strip.querySelector("[data-load-delta]");
+
+            if (data.trend && data.trend.has_graph && trendNode) {
+                trendNode.style.display = "";
+                setLevelClass(trendNode, "uptime-monitor-load-trend", statusLevel);
+                trendNode.setAttribute("title", data.trend.title || "Load trend");
+                if (trendLabelNode) {
+                    trendLabelNode.textContent = data.trend.window_label || "24h";
+                }
+                if (trendLineNode) {
+                    trendLineNode.setAttribute("points", data.trend.sparkline_points || "");
+                }
+                if (trendSvgNode && data.trend.title) {
+                    trendSvgNode.setAttribute("aria-label", data.trend.title);
+                }
+                if (trendDeltaNode) {
+                    var deltaText = data.trend.delta_text || "";
+                    trendDeltaNode.textContent = deltaText;
+                    trendDeltaNode.style.display = deltaText ? "" : "none";
+                }
+            } else if (trendNode) {
+                trendNode.style.display = "none";
+            }
+
+            var cpuNode = strip.querySelector("[data-load-cpu]");
+            if (cpuNode && data.cpu && data.cpu.text) {
+                cpuNode.textContent = data.cpu.text;
+            }
+
+            var warningNode = strip.querySelector("[data-load-warning]");
+            if (warningNode) {
+                var warningText = data.warning || "";
+                warningNode.textContent = warningText;
+                warningNode.classList.toggle("is-hidden", !warningText);
+            }
+        };
+
+        var showWarning = function(message) {
+            var warningNode = strip.querySelector("[data-load-warning]");
+            if (!warningNode) {
+                return;
+            }
+            warningNode.textContent = message || "Unable to refresh load metrics.";
+            warningNode.classList.remove("is-hidden");
+        };
+
+        var fetchLiveLoad = function() {
+            if (inFlight) {
+                return;
+            }
+            inFlight = true;
+
+            var formData = new URLSearchParams();
+            formData.append("action", "uptime_monitor_get_live_load");
+            formData.append("nonce", ajaxNonce);
+
+            fetch(ajaxUrl, {
+                method: "POST",
+                credentials: "same-origin",
+                headers: {
+                    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"
+                },
+                body: formData.toString()
+            }).then(function(response) {
+                return response.json();
+            }).then(function(payload) {
+                if (!payload || !payload.success || !payload.data) {
+                    var message = payload && payload.data && payload.data.message ? payload.data.message : "Unable to refresh load metrics.";
+                    throw new Error(message);
+                }
+                applyPayload(payload.data);
+            }).catch(function(error) {
+                showWarning(error && error.message ? error.message : "Unable to refresh load metrics.");
+            }).finally(function() {
+                inFlight = false;
+            });
+        };
+
+        window.setInterval(function() {
+            if (document.visibilityState === "visible") {
+                fetchLiveLoad();
+            }
+        }, refreshMs);
+
+        document.addEventListener("visibilitychange", function() {
+            if (document.visibilityState === "visible") {
+                fetchLiveLoad();
+            }
+        });
+    })();
+    </script>';
+}
+add_action('admin_footer', 'uptime_monitor_enqueue_disk_graph_script');
 
 function uptime_monitor_get_mainwp_sites($get_tags = false) {
     global $wpdb;
@@ -781,8 +1902,40 @@ function uptime_monitor_schedule_task() {
     if (!wp_next_scheduled('uptime_monitor_hourly_check')) {
         wp_schedule_event(time(), 'hourly', 'uptime_monitor_hourly_check');
     }
+
+    if (!wp_next_scheduled('uptime_monitor_load_sample_check')) {
+        wp_schedule_event(time() + 60, 'uptime_monitor_every_five_minutes', 'uptime_monitor_load_sample_check');
+    }
 }
 add_action('init', 'uptime_monitor_schedule_task');
+
+function uptime_monitor_add_cron_intervals($schedules) {
+    if (!isset($schedules['uptime_monitor_every_five_minutes'])) {
+        $schedules['uptime_monitor_every_five_minutes'] = [
+            'interval' => 5 * MINUTE_IN_SECONDS,
+            'display'  => 'Every 5 Minutes (Uptime Monitor)',
+        ];
+    }
+
+    return $schedules;
+}
+add_filter('cron_schedules', 'uptime_monitor_add_cron_intervals');
+
+function uptime_monitor_capture_load_sample() {
+    $whm_user      = get_option('uptime_monitor_whm_user');
+    $whm_api_token = get_option('uptime_monitor_whm_api_token');
+    $server_url    = get_option('uptime_monitor_whm_server_url');
+
+    if (empty($whm_user) || empty($whm_api_token) || empty($server_url)) {
+        return;
+    }
+
+    $load_average = get_whm_load_average($whm_user, $whm_api_token, $server_url);
+    if (is_array($load_average)) {
+        uptime_monitor_record_load_sample($load_average, 0);
+    }
+}
+add_action('uptime_monitor_load_sample_check', 'uptime_monitor_capture_load_sample');
 
 function uptime_monitor_perform_hourly_check() {
     $sites = uptime_monitor_get_mainwp_sites();
