@@ -110,62 +110,250 @@ function get_whm_server_stats() {
     $whm_api_token = get_option('uptime_monitor_whm_api_token'); // Your WHM API token
     $server_url    = get_option('uptime_monitor_whm_server_url');
 
+    $stats = [
+        'error'                  => '',
+        'warning'                => '',
+        'server_disk'            => null,
+        'total_accounts_used_mb' => 0.0,
+        'accounts'               => [],
+    ];
+
     if (empty($whm_user) || empty($whm_api_token) || empty($server_url)) {
-        return 'Please configure the WHM credentials in the Uptime Monitor settings.';
+        $stats['error'] = 'Please configure the WHM credentials in the Uptime Monitor settings.';
+        return $stats;
     }
 
     // Retrieve the list of accounts
     $accounts = get_whm_account_list($whm_user, $whm_api_token, $server_url);
     if (!is_array($accounts)) {
-        return $accounts; // Return the error message
+        $stats['error'] = $accounts; // Return the error message
+        return $stats;
     }
 
-    $total_account_disk_usage = 0;
+    $total_account_disk_usage = 0.0;
     $accounts_data = [];
 
     foreach ($accounts as $account) {
-        $username  = $account['user'] ?? '';
-        $domain    = $account['domain'] ?? '';
-        $disk_used = isset($account['diskused']) ? $account['diskused'] : '0';
-        $suspended = isset($account['suspended']) && $account['suspended'] ? 'Yes' : 'No';
+        $username       = $account['user'] ?? '';
+        $domain         = $account['domain'] ?? '';
+        $disk_used_raw  = isset($account['diskused']) ? $account['diskused'] : '0';
+        $disk_limit_raw = isset($account['disklimit']) ? $account['disklimit'] : '';
+        $suspended      = isset($account['suspended']) && $account['suspended'] ? 'Yes' : 'No';
 
-        $disk_used_clean = str_replace(['M', ','], '', $disk_used);
-        $disk_used_float = floatval($disk_used_clean);
-        $total_account_disk_usage += $disk_used_float;
+        $disk_used_mb  = uptime_monitor_parse_size_to_mb($disk_used_raw);
+        $disk_limit_mb = uptime_monitor_parse_size_to_mb($disk_limit_raw, true);
+
+        $has_disk_limit = ($disk_limit_mb !== null && $disk_limit_mb > 0);
+        $disk_free_mb   = $has_disk_limit ? max(0.0, $disk_limit_mb - $disk_used_mb) : null;
+        $disk_used_pct  = $has_disk_limit ? min(100.0, ($disk_used_mb / $disk_limit_mb) * 100.0) : null;
+
+        $total_account_disk_usage += $disk_used_mb;
 
         $accounts_data[] = [
-            'username'  => $username,
-            'domain'    => $domain,
-            'disk_used' => $disk_used,
-            'suspended' => $suspended,
+            'username'       => $username,
+            'domain'         => $domain,
+            'disk_used_mb'   => $disk_used_mb,
+            'disk_limit_mb'  => $has_disk_limit ? $disk_limit_mb : null,
+            'disk_free_mb'   => $disk_free_mb,
+            'disk_used_pct'  => $disk_used_pct,
+            'disk_used_raw'  => $disk_used_raw,
+            'disk_limit_raw' => $disk_limit_raw,
+            'suspended'      => $suspended,
         ];
     }
 
-    $total_space_bytes = disk_total_space("/");
-    $free_space_bytes  = disk_free_space("/");
+    $total_space_bytes = disk_total_space('/');
+    $free_space_bytes  = disk_free_space('/');
 
-    if ($total_space_bytes === false || $free_space_bytes === false) {
-        $disk_usage_info = "Unable to retrieve total disk usage information.";
+    if ($total_space_bytes !== false && $free_space_bytes !== false && $total_space_bytes > 0) {
+        $used_space_bytes = max(0, $total_space_bytes - $free_space_bytes);
+
+        $stats['server_disk'] = [
+            'total_mb'    => $total_space_bytes / (1024 * 1024),
+            'used_mb'     => $used_space_bytes / (1024 * 1024),
+            'free_mb'     => $free_space_bytes / (1024 * 1024),
+            'used_pct'    => min(100.0, ($used_space_bytes / $total_space_bytes) * 100.0),
+            'total_gb'    => $total_space_bytes / (1024 * 1024 * 1024),
+            'used_gb'     => $used_space_bytes / (1024 * 1024 * 1024),
+            'free_gb'     => $free_space_bytes / (1024 * 1024 * 1024),
+        ];
     } else {
-        $used_space_bytes = $total_space_bytes - $free_space_bytes;
-
-        $total_space_gb = round($total_space_bytes / (1024 * 1024 * 1024), 2);
-        $free_space_gb  = round($free_space_bytes / (1024 * 1024 * 1024), 2);
-        $used_space_gb  = round($used_space_bytes / (1024 * 1024 * 1024), 2);
-
-        $disk_usage_info  = "Total Disk Space: {$total_space_gb} GB<br>";
-        $disk_usage_info .= "Used Disk Space: {$used_space_gb} GB<br>";
-        $disk_usage_info .= "Free Disk Space: {$free_space_gb} GB<br>";
+        $stats['warning'] = 'Unable to retrieve local server disk usage information.';
     }
 
-    $output = $disk_usage_info . "<br>";
-    $output .= "Total cPanel Accounts Disk Usage: {$total_account_disk_usage} MB<br><br>";
-    $output .= "Accounts:<br>";
-    foreach ($accounts_data as $data) {
-        $output .= "User: {$data['username']}, Domain: {$data['domain']}, Disk Used: {$data['disk_used']}, Suspended: {$data['suspended']}<br>";
+    usort($accounts_data, function($a, $b) {
+        return ($b['disk_used_mb'] <=> $a['disk_used_mb']);
+    });
+
+    $stats['total_accounts_used_mb'] = $total_account_disk_usage;
+    $stats['accounts'] = $accounts_data;
+
+    return $stats;
+}
+
+function uptime_monitor_parse_size_to_mb($value, $allow_unlimited = false) {
+    if (!is_scalar($value)) {
+        return $allow_unlimited ? null : 0.0;
     }
+
+    $value = trim((string) $value);
+    if ($value === '') {
+        return $allow_unlimited ? null : 0.0;
+    }
+
+    $normalized = strtolower(str_replace(',', '', $value));
+    if ($allow_unlimited && in_array($normalized, ['unlimited', 'infinity', '∞', '0', '0m', '0mb'], true)) {
+        return null;
+    }
+
+    if (!preg_match('/^([0-9]*\.?[0-9]+)\s*([kmgtp]?)(b)?$/i', $normalized, $matches)) {
+        return $allow_unlimited ? null : 0.0;
+    }
+
+    $amount = (float) $matches[1];
+    $unit   = strtolower($matches[2]);
+
+    switch ($unit) {
+        case 'k':
+            return $amount / 1024.0;
+        case 'g':
+            return $amount * 1024.0;
+        case 't':
+            return $amount * 1024.0 * 1024.0;
+        case 'p':
+            return $amount * 1024.0 * 1024.0 * 1024.0;
+        case 'm':
+        default:
+            return $amount;
+    }
+}
+
+function uptime_monitor_format_mb($size_mb) {
+    if ($size_mb === null) {
+        return 'Unlimited';
+    }
+
+    $size_mb = max(0.0, (float) $size_mb);
+
+    if ($size_mb >= 1024.0 * 1024.0) {
+        return number_format($size_mb / (1024.0 * 1024.0), 2) . ' TB';
+    }
+
+    if ($size_mb >= 1024.0) {
+        return number_format($size_mb / 1024.0, 2) . ' GB';
+    }
+
+    return number_format($size_mb, 0) . ' MB';
+}
+
+function uptime_monitor_render_usage_bar($used_pct, $used_label, $free_label, $show_free_segment = true) {
+    $used_pct = max(0.0, min(100.0, (float) $used_pct));
+    $free_pct = $show_free_segment ? max(0.0, 100.0 - $used_pct) : 0.0;
+
+    $used_style = 'width:' . number_format($used_pct, 2, '.', '') . '%;';
+    $free_style = 'width:' . number_format($free_pct, 2, '.', '') . '%;';
+
+    $output  = '<div class="uptime-monitor-usage-bar">';
+    $output .= '<span class="uptime-monitor-usage-segment uptime-monitor-usage-used" style="' . esc_attr($used_style) . '"></span>';
+    if ($show_free_segment) {
+        $output .= '<span class="uptime-monitor-usage-segment uptime-monitor-usage-free" style="' . esc_attr($free_style) . '"></span>';
+    }
+    $output .= '</div>';
+    $output .= '<div class="uptime-monitor-usage-labels">';
+    $output .= '<span>Used: ' . esc_html($used_label) . '</span>';
+    $output .= '<span>Free: ' . esc_html($free_label) . '</span>';
+    $output .= '</div>';
 
     return $output;
+}
+
+function uptime_monitor_render_server_stats($stats) {
+    echo '<h2>Server Stats</h2>';
+
+    if (!empty($stats['error'])) {
+        echo '<p>' . esc_html($stats['error']) . '</p>';
+        return;
+    }
+
+    if (!empty($stats['warning'])) {
+        echo '<p>' . esc_html($stats['warning']) . '</p>';
+    }
+
+    echo '<div class="uptime-monitor-stats-grid">';
+
+    if (!empty($stats['server_disk'])) {
+        $disk = $stats['server_disk'];
+        echo '<div class="uptime-monitor-stat-card">';
+        echo '<h3>Server Disk Space</h3>';
+        echo uptime_monitor_render_usage_bar(
+            $disk['used_pct'],
+            number_format($disk['used_gb'], 2) . ' GB',
+            number_format($disk['free_gb'], 2) . ' GB'
+        );
+        echo '<p class="uptime-monitor-stat-meta">Total: ' . esc_html(number_format($disk['total_gb'], 2)) . ' GB</p>';
+        echo '</div>';
+
+        $accounts_used_pct = min(100.0, ($stats['total_accounts_used_mb'] / $disk['total_mb']) * 100.0);
+        echo '<div class="uptime-monitor-stat-card">';
+        echo '<h3>cPanel Usage Total</h3>';
+        echo uptime_monitor_render_usage_bar(
+            $accounts_used_pct,
+            uptime_monitor_format_mb($stats['total_accounts_used_mb']),
+            uptime_monitor_format_mb(max(0.0, $disk['total_mb'] - $stats['total_accounts_used_mb']))
+        );
+        echo '<p class="uptime-monitor-stat-meta">Combined disk used by all cPanel accounts.</p>';
+        echo '</div>';
+    } else {
+        echo '<div class="uptime-monitor-stat-card">';
+        echo '<h3>Server Disk Space</h3>';
+        echo '<p class="uptime-monitor-stat-meta">Disk usage is currently unavailable.</p>';
+        echo '</div>';
+    }
+
+    echo '</div>';
+
+    echo '<h3>cPanel Account Disk Usage</h3>';
+    echo '<table class="widefat striped uptime-monitor-account-usage-table">';
+    echo '<thead><tr><th>Account</th><th>Domain</th><th>Usage</th><th>Quota</th><th>Status</th></tr></thead>';
+    echo '<tbody>';
+
+    if (empty($stats['accounts'])) {
+        echo '<tr><td colspan="5">No cPanel accounts found.</td></tr>';
+    } else {
+        foreach ($stats['accounts'] as $account) {
+            $account_name = !empty($account['username']) ? $account['username'] : 'N/A';
+            $domain       = !empty($account['domain']) ? $account['domain'] : 'N/A';
+            $status       = $account['suspended'] === 'Yes' ? 'Suspended' : 'Active';
+
+            if (!empty($account['disk_limit_mb']) && $account['disk_limit_mb'] > 0) {
+                $usage_bar = uptime_monitor_render_usage_bar(
+                    $account['disk_used_pct'],
+                    uptime_monitor_format_mb($account['disk_used_mb']),
+                    uptime_monitor_format_mb($account['disk_free_mb'])
+                );
+                $quota_label = uptime_monitor_format_mb($account['disk_limit_mb']);
+            } else {
+                $usage_bar = uptime_monitor_render_usage_bar(
+                    100,
+                    uptime_monitor_format_mb($account['disk_used_mb']),
+                    'Unlimited quota',
+                    false
+                );
+                $quota_label = 'Unlimited';
+            }
+
+            echo '<tr>';
+            echo '<td>' . esc_html($account_name) . '</td>';
+            echo '<td>' . esc_html($domain) . '</td>';
+            echo '<td class="uptime-monitor-account-usage-cell">' . $usage_bar . '</td>';
+            echo '<td>' . esc_html($quota_label) . '</td>';
+            echo '<td>' . esc_html($status) . '</td>';
+            echo '</tr>';
+        }
+    }
+
+    echo '</tbody>';
+    echo '</table>';
 }
 
 function get_whm_account_list($whm_user, $whm_api_token, $server_url) {
@@ -210,8 +398,7 @@ function uptime_monitor_page() {
 
     // Fetch and display the server stats
     $server_stats = get_whm_server_stats();
-    echo '<h2>Server Stats</h2>';
-    echo '<p>' . wp_kses_post($server_stats) . '</p>';
+    uptime_monitor_render_server_stats($server_stats);
 
     if (isset($_POST['check_all_sites'])) {
         check_admin_referer('uptime_monitor_check_all_sites', 'uptime_monitor_check_all_sites_nonce');
@@ -354,6 +541,58 @@ function uptime_monitor_enqueue_styles() {
         .error {
             color: red !important;
             font-weight: bold;
+        }
+        .uptime-monitor-stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 16px;
+            margin: 12px 0 18px;
+        }
+        .uptime-monitor-stat-card {
+            background: #fff;
+            border: 1px solid #dcdcde;
+            border-radius: 8px;
+            padding: 14px;
+        }
+        .uptime-monitor-stat-card h3 {
+            margin: 0 0 10px;
+        }
+        .uptime-monitor-stat-meta {
+            margin: 8px 0 0;
+            color: #50575e;
+        }
+        .uptime-monitor-usage-bar {
+            display: flex;
+            width: 100%;
+            height: 16px;
+            border: 1px solid #dcdcde;
+            border-radius: 999px;
+            overflow: hidden;
+            background: #f0f0f1;
+        }
+        .uptime-monitor-usage-segment {
+            display: block;
+            height: 100%;
+        }
+        .uptime-monitor-usage-used {
+            background: #d63638;
+        }
+        .uptime-monitor-usage-free {
+            background: #00a32a;
+        }
+        .uptime-monitor-usage-labels {
+            display: flex;
+            justify-content: space-between;
+            gap: 10px;
+            margin-top: 6px;
+            font-size: 12px;
+            color: #50575e;
+        }
+        .uptime-monitor-account-usage-table td {
+            vertical-align: middle;
+        }
+        .uptime-monitor-account-usage-cell {
+            min-width: 260px;
         }
     </style>';
 }
