@@ -114,6 +114,7 @@ function get_whm_server_stats() {
         'error'                  => '',
         'warning'                => '',
         'account_metrics_warning' => '',
+        'account_metrics_coverage' => [],
         'load_warning'           => '',
         'load_average'           => null,
         'load_trend'             => [],
@@ -150,25 +151,59 @@ function get_whm_server_stats() {
 
     $stats['load_trend'] = uptime_monitor_get_load_trend_data(24 * HOUR_IN_SECONDS, 48);
 
-    $bandwidth_by_user = get_whm_account_bandwidth_usage($whm_user, $whm_api_token, $server_url);
-    if (!is_array($bandwidth_by_user)) {
-        $stats['account_metrics_warning'] = (string) $bandwidth_by_user;
-        $bandwidth_by_user = [];
+    $bandwidth_by_user = [];
+    $bandwidth_warning = '';
+    $bandwidth_source = [];
+
+    $showbw_bandwidth = get_whm_account_bandwidth_usage($whm_user, $whm_api_token, $server_url);
+    if (is_array($showbw_bandwidth)) {
+        $bandwidth_by_user = $showbw_bandwidth;
+        if (!empty($showbw_bandwidth)) {
+            $bandwidth_source[] = 'showbw';
+        }
+    } else {
+        $bandwidth_warning = (string) $showbw_bandwidth;
+    }
+
+    $showres_bandwidth = get_whm_account_bandwidth_usage_showres($whm_user, $whm_api_token, $server_url);
+    if (is_array($showres_bandwidth)) {
+        if (!empty($showres_bandwidth)) {
+            $bandwidth_source[] = 'showres';
+        }
+        foreach ($showres_bandwidth as $key => $metric) {
+            if (!isset($bandwidth_by_user[$key]) && is_array($metric)) {
+                $bandwidth_by_user[$key] = $metric;
+            }
+        }
+    } elseif ($bandwidth_warning === '') {
+        $bandwidth_warning = (string) $showres_bandwidth;
     }
 
     $inode_by_user = get_whm_account_inode_usage($whm_user, $whm_api_token, $server_url);
+    $inode_warning = '';
     if (!is_array($inode_by_user)) {
         $inode_warning = (string) $inode_by_user;
+        $inode_by_user = [];
+    }
+
+    if ($bandwidth_warning !== '' && empty($bandwidth_by_user)) {
+        $stats['account_metrics_warning'] = $bandwidth_warning;
+    }
+    if ($inode_warning !== '' && empty($inode_by_user)) {
         if (!empty($stats['account_metrics_warning'])) {
             $stats['account_metrics_warning'] .= ' ' . $inode_warning;
         } else {
             $stats['account_metrics_warning'] = $inode_warning;
         }
-        $inode_by_user = [];
     }
 
     $total_account_disk_usage = 0.0;
     $accounts_data = [];
+    $total_accounts = count($accounts);
+    $bandwidth_matched = 0;
+    $inode_matched = 0;
+    $bandwidth_missing_accounts = [];
+    $inode_missing_accounts = [];
 
     foreach ($accounts as $account) {
         $username       = $account['user'] ?? '';
@@ -176,7 +211,6 @@ function get_whm_server_stats() {
         $disk_used_raw  = isset($account['diskused']) ? $account['diskused'] : '0';
         $disk_limit_raw = isset($account['disklimit']) ? $account['disklimit'] : '';
         $suspended      = isset($account['suspended']) && $account['suspended'] ? 'Yes' : 'No';
-        $user_key       = strtolower(trim((string) $username));
 
         $disk_used_mb  = uptime_monitor_parse_size_to_mb($disk_used_raw);
         $disk_limit_mb = uptime_monitor_parse_size_to_mb($disk_limit_raw, true);
@@ -187,12 +221,8 @@ function get_whm_server_stats() {
 
         $total_account_disk_usage += $disk_used_mb;
 
-        $bandwidth_info = isset($bandwidth_by_user[$user_key]) && is_array($bandwidth_by_user[$user_key])
-            ? $bandwidth_by_user[$user_key]
-            : [];
-        $inode_info = isset($inode_by_user[$user_key]) && is_array($inode_by_user[$user_key])
-            ? $inode_by_user[$user_key]
-            : [];
+        $bandwidth_info = uptime_monitor_get_metric_entry_for_account($bandwidth_by_user, $username, $domain);
+        $inode_info = uptime_monitor_get_metric_entry_for_account($inode_by_user, $username, $domain);
 
         $bandwidth_used_mb  = isset($bandwidth_info['used_mb']) && is_numeric($bandwidth_info['used_mb'])
             ? max(0.0, (float) $bandwidth_info['used_mb'])
@@ -206,6 +236,19 @@ function get_whm_server_stats() {
         $inodes_limit = isset($inode_info['limit']) && is_numeric($inode_info['limit'])
             ? max(0, (int) $inode_info['limit'])
             : null;
+
+        $account_label = $username !== '' ? $username : ($domain !== '' ? $domain : 'Unknown account');
+        if ($bandwidth_used_mb !== null || $bandwidth_limit_mb !== null) {
+            $bandwidth_matched++;
+        } else {
+            $bandwidth_missing_accounts[] = $account_label;
+        }
+
+        if ($inodes_used !== null || $inodes_limit !== null) {
+            $inode_matched++;
+        } else {
+            $inode_missing_accounts[] = $account_label;
+        }
 
         $accounts_data[] = [
             'username'       => $username,
@@ -249,6 +292,14 @@ function get_whm_server_stats() {
 
     $stats['total_accounts_used_mb'] = $total_account_disk_usage;
     $stats['accounts'] = $accounts_data;
+    $stats['account_metrics_coverage'] = [
+        'total_accounts' => $total_accounts,
+        'bandwidth_matched' => $bandwidth_matched,
+        'inode_matched' => $inode_matched,
+        'bandwidth_missing_accounts' => $bandwidth_missing_accounts,
+        'inode_missing_accounts' => $inode_missing_accounts,
+        'bandwidth_sources' => array_values(array_unique($bandwidth_source)),
+    ];
 
     return $stats;
 }
@@ -348,6 +399,128 @@ function uptime_monitor_parse_non_negative_number($value) {
     }
 
     return $number;
+}
+
+function uptime_monitor_normalize_lookup_key($value) {
+    if (!is_scalar($value)) {
+        return '';
+    }
+
+    $key = strtolower(trim((string) $value));
+    if ($key === '') {
+        return '';
+    }
+
+    if (strpos($key, '://') !== false) {
+        $host = parse_url($key, PHP_URL_HOST);
+        if (is_string($host) && $host !== '') {
+            $key = $host;
+        }
+    }
+
+    $key = preg_replace('#^https?://#i', '', $key);
+    $key = preg_replace('#/.*$#', '', $key);
+    $key = preg_replace('/:\d+$/', '', $key);
+    $key = preg_replace('/^www\./', '', $key);
+
+    return trim((string) $key, ". \t\n\r\0\x0B");
+}
+
+function uptime_monitor_get_account_lookup_keys($username = '', $domain = '') {
+    $keys = [];
+
+    $user_key = uptime_monitor_normalize_lookup_key($username);
+    if ($user_key !== '') {
+        $keys[] = $user_key;
+    }
+
+    $domain_key = uptime_monitor_normalize_lookup_key($domain);
+    if ($domain_key !== '' && !in_array($domain_key, $keys, true)) {
+        $keys[] = $domain_key;
+    }
+
+    return $keys;
+}
+
+function uptime_monitor_add_metric_entry(&$map, $keys, $metric) {
+    if (!is_array($map) || !is_array($keys) || !is_array($metric)) {
+        return;
+    }
+
+    foreach ($keys as $key) {
+        $normalized_key = uptime_monitor_normalize_lookup_key($key);
+        if ($normalized_key === '') {
+            continue;
+        }
+
+        if (!isset($map[$normalized_key])) {
+            $map[$normalized_key] = $metric;
+        }
+    }
+}
+
+function uptime_monitor_get_metric_entry_for_account($map, $username = '', $domain = '') {
+    if (!is_array($map)) {
+        return [];
+    }
+
+    $keys = uptime_monitor_get_account_lookup_keys($username, $domain);
+    foreach ($keys as $key) {
+        if (isset($map[$key]) && is_array($map[$key])) {
+            return $map[$key];
+        }
+    }
+
+    return [];
+}
+
+function uptime_monitor_extract_account_domain_from_row($row) {
+    if (!is_array($row)) {
+        return '';
+    }
+
+    $domain_fields = ['domain', 'main_domain', 'userdomain', 'domainname'];
+    foreach ($domain_fields as $field) {
+        if (isset($row[$field]) && is_scalar($row[$field])) {
+            $domain = trim((string) $row[$field]);
+            if ($domain !== '') {
+                return $domain;
+            }
+        }
+    }
+
+    return '';
+}
+
+function uptime_monitor_format_account_name_list($names, $max_items = 3) {
+    if (!is_array($names) || empty($names)) {
+        return '';
+    }
+
+    $clean = [];
+    foreach ($names as $name) {
+        $name = trim((string) $name);
+        if ($name === '') {
+            continue;
+        }
+        $clean[] = $name;
+    }
+
+    if (empty($clean)) {
+        return '';
+    }
+
+    $clean = array_values(array_unique($clean));
+    $max_items = max(1, (int) $max_items);
+    $shown = array_slice($clean, 0, $max_items);
+    $remaining = count($clean) - count($shown);
+
+    $text = implode(', ', $shown);
+    if ($remaining > 0) {
+        $text .= ' +' . $remaining . ' more';
+    }
+
+    return $text;
 }
 
 function uptime_monitor_format_bandwidth_summary($used_mb, $limit_mb = null) {
@@ -924,6 +1097,51 @@ function uptime_monitor_render_server_stats($stats) {
         echo '<p class="uptime-monitor-disk-warning">' . esc_html($stats['account_metrics_warning']) . '</p>';
     }
 
+    $metrics_coverage = (isset($stats['account_metrics_coverage']) && is_array($stats['account_metrics_coverage']))
+        ? $stats['account_metrics_coverage']
+        : [];
+    $coverage_total = isset($metrics_coverage['total_accounts']) ? (int) $metrics_coverage['total_accounts'] : 0;
+    if ($coverage_total > 0) {
+        $bw_matched = isset($metrics_coverage['bandwidth_matched']) ? (int) $metrics_coverage['bandwidth_matched'] : 0;
+        $inode_matched = isset($metrics_coverage['inode_matched']) ? (int) $metrics_coverage['inode_matched'] : 0;
+        $bw_missing = isset($metrics_coverage['bandwidth_missing_accounts']) && is_array($metrics_coverage['bandwidth_missing_accounts'])
+            ? $metrics_coverage['bandwidth_missing_accounts']
+            : [];
+        $inode_missing = isset($metrics_coverage['inode_missing_accounts']) && is_array($metrics_coverage['inode_missing_accounts'])
+            ? $metrics_coverage['inode_missing_accounts']
+            : [];
+        $bw_sources = isset($metrics_coverage['bandwidth_sources']) && is_array($metrics_coverage['bandwidth_sources'])
+            ? $metrics_coverage['bandwidth_sources']
+            : [];
+
+        if ($bw_matched === $coverage_total && $inode_matched === $coverage_total) {
+            $coverage_message = 'Account metrics coverage: bandwidth and inode data matched all ' . $coverage_total . ' cPanel accounts.';
+        } else {
+            $coverage_message = 'Account metrics coverage: bandwidth data matched ' . $bw_matched . ' of ' . $coverage_total . ' cPanel accounts';
+            if ($bw_matched < $coverage_total) {
+                $bw_missing_text = uptime_monitor_format_account_name_list($bw_missing, 3);
+                if ($bw_missing_text !== '') {
+                    $coverage_message .= ' (missing: ' . $bw_missing_text . ')';
+                }
+            }
+
+            $coverage_message .= '; inode data matched ' . $inode_matched . ' of ' . $coverage_total . ' cPanel accounts';
+            if ($inode_matched < $coverage_total) {
+                $inode_missing_text = uptime_monitor_format_account_name_list($inode_missing, 3);
+                if ($inode_missing_text !== '') {
+                    $coverage_message .= ' (missing: ' . $inode_missing_text . ')';
+                }
+            }
+            $coverage_message .= '. Accounts without matched metrics show as N/A in the cards below. This usually means the WHM API token has partial visibility (owner/reseller scope) rather than full-server visibility.';
+        }
+
+        if (!empty($bw_sources)) {
+            $coverage_message .= ' Bandwidth sources used: ' . implode(', ', $bw_sources) . '.';
+        }
+
+        echo '<p class="uptime-monitor-disk-warning">' . esc_html($coverage_message) . '</p>';
+    }
+
     echo '<p class="uptime-monitor-disk-summary">';
     echo 'Total: <strong>' . esc_html(number_format($disk['total_gb'], 2)) . ' GB</strong> ';
     echo '| Used: <strong>' . esc_html(number_format($disk['used_gb'], 2)) . ' GB</strong> ';
@@ -1071,10 +1289,11 @@ function get_whm_account_bandwidth_usage($whm_user, $whm_api_token, $server_url)
             continue;
         }
 
-        $user = isset($row['user']) ? strtolower(trim((string) $row['user'])) : '';
+        $user = isset($row['user']) ? trim((string) $row['user']) : '';
         if ($user === '') {
             continue;
         }
+        $domain = uptime_monitor_extract_account_domain_from_row($row);
 
         $used_bytes = uptime_monitor_parse_non_negative_number($row['totalbytes'] ?? null);
         if ($used_bytes === null && !empty($row['bwusage']) && is_array($row['bwusage'])) {
@@ -1100,10 +1319,144 @@ function get_whm_account_bandwidth_usage($whm_user, $whm_api_token, $server_url)
 
         $limit_bytes = uptime_monitor_parse_non_negative_number($row['limit'] ?? null);
 
-        $bandwidth_by_user[$user] = [
+        $metric = [
             'used_mb'  => ($used_bytes === null) ? null : ($used_bytes / (1024.0 * 1024.0)),
             'limit_mb' => ($limit_bytes !== null && $limit_bytes > 0.0) ? ($limit_bytes / (1024.0 * 1024.0)) : null,
         ];
+        $keys = uptime_monitor_get_account_lookup_keys($user, $domain);
+        uptime_monitor_add_metric_entry($bandwidth_by_user, $keys, $metric);
+    }
+
+    return $bandwidth_by_user;
+}
+
+function get_whm_account_bandwidth_usage_showres($whm_user, $whm_api_token, $server_url) {
+    $query = rtrim($server_url, '/') . '/json-api/showres?api.version=1';
+
+    $curl = curl_init();
+    curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, 0); // For development; consider enabling in production
+    curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, 0); // For development; consider enabling in production
+    curl_setopt($curl, CURLOPT_RETURNTRANSFER, 1);
+    curl_setopt($curl, CURLOPT_HTTPHEADER, ['Authorization: whm ' . $whm_user . ':' . $whm_api_token]);
+    curl_setopt($curl, CURLOPT_URL, $query);
+
+    $result = curl_exec($curl);
+
+    if (curl_errno($curl)) {
+        return 'Unable to retrieve fallback account bandwidth usage from WHM (showres): ' . curl_error($curl);
+    }
+
+    curl_close($curl);
+
+    $data = json_decode($result, true);
+    if (!is_array($data)) {
+        return 'Unable to retrieve fallback account bandwidth usage from WHM (showres, invalid API response).';
+    }
+
+    if (isset($data['metadata']['result']) && (int) $data['metadata']['result'] === 0) {
+        $reason = isset($data['metadata']['reason']) ? (string) $data['metadata']['reason'] : 'Unknown error';
+        return 'Unable to retrieve fallback account bandwidth usage from WHM (showres): ' . $reason;
+    }
+
+    $bandwidth_by_user = [];
+    $rows = [];
+    $collector = function($node, $depth = 0) use (&$collector, &$rows) {
+        if ($depth > 6 || !is_array($node)) {
+            return;
+        }
+
+        $has_identity = isset($node['user']) || isset($node['username']);
+        $has_bandwidth = isset($node['totalbytes']) || isset($node['limit']) || isset($node['bwusage']) || isset($node['xferused']) || isset($node['xferlimit']);
+        if ($has_identity && $has_bandwidth) {
+            $rows[] = $node;
+            return;
+        }
+
+        foreach ($node as $value) {
+            if (is_array($value)) {
+                $collector($value, $depth + 1);
+            }
+        }
+    };
+    $collector(isset($data['data']) ? $data['data'] : []);
+
+    foreach ($rows as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+
+        $user = '';
+        if (isset($row['user']) && is_scalar($row['user'])) {
+            $user = trim((string) $row['user']);
+        } elseif (isset($row['username']) && is_scalar($row['username'])) {
+            $user = trim((string) $row['username']);
+        }
+        if ($user === '') {
+            continue;
+        }
+
+        $domain = uptime_monitor_extract_account_domain_from_row($row);
+
+        $used_mb = null;
+        $used_bytes = uptime_monitor_parse_non_negative_number($row['totalbytes'] ?? null);
+        if ($used_bytes !== null) {
+            $used_mb = $used_bytes / (1024.0 * 1024.0);
+        } elseif (isset($row['xferused'])) {
+            $xfer_used_raw = $row['xferused'];
+            if (is_numeric((string) $xfer_used_raw)) {
+                $xfer_used_num = (float) $xfer_used_raw;
+                $used_mb = ($xfer_used_num > (4 * 1024.0 * 1024.0))
+                    ? ($xfer_used_num / (1024.0 * 1024.0))
+                    : $xfer_used_num;
+            } else {
+                $used_mb = uptime_monitor_parse_size_to_mb($xfer_used_raw, true);
+            }
+        }
+
+        if ($used_mb === null && !empty($row['bwusage']) && is_array($row['bwusage'])) {
+            $bucket_total_bytes = 0.0;
+            $has_bucket_data = false;
+            foreach ($row['bwusage'] as $bucket) {
+                if (!is_array($bucket)) {
+                    continue;
+                }
+                $usage_value = uptime_monitor_parse_non_negative_number($bucket['usage'] ?? null);
+                if ($usage_value === null) {
+                    continue;
+                }
+                $bucket_total_bytes += $usage_value;
+                $has_bucket_data = true;
+            }
+            if ($has_bucket_data) {
+                $used_mb = $bucket_total_bytes / (1024.0 * 1024.0);
+            }
+        }
+
+        $limit_mb = null;
+        $limit_bytes = uptime_monitor_parse_non_negative_number($row['limit'] ?? null);
+        if ($limit_bytes !== null && $limit_bytes > 0.0) {
+            $limit_mb = $limit_bytes / (1024.0 * 1024.0);
+        } elseif (isset($row['xferlimit'])) {
+            $xfer_limit_raw = $row['xferlimit'];
+            if (is_numeric((string) $xfer_limit_raw)) {
+                $xfer_limit_num = (float) $xfer_limit_raw;
+                $limit_mb = ($xfer_limit_num > (4 * 1024.0 * 1024.0))
+                    ? ($xfer_limit_num / (1024.0 * 1024.0))
+                    : $xfer_limit_num;
+            } else {
+                $limit_mb = uptime_monitor_parse_size_to_mb($xfer_limit_raw, true);
+            }
+            if ($limit_mb !== null && $limit_mb <= 0.0) {
+                $limit_mb = null;
+            }
+        }
+
+        $metric = [
+            'used_mb'  => $used_mb === null ? null : max(0.0, (float) $used_mb),
+            'limit_mb' => $limit_mb === null ? null : max(0.0, (float) $limit_mb),
+        ];
+        $keys = uptime_monitor_get_account_lookup_keys($user, $domain);
+        uptime_monitor_add_metric_entry($bandwidth_by_user, $keys, $metric);
     }
 
     return $bandwidth_by_user;
@@ -1148,18 +1501,21 @@ function get_whm_account_inode_usage($whm_user, $whm_api_token, $server_url) {
             continue;
         }
 
-        $user = isset($row['user']) ? strtolower(trim((string) $row['user'])) : '';
+        $user = isset($row['user']) ? trim((string) $row['user']) : '';
         if ($user === '') {
             continue;
         }
+        $domain = uptime_monitor_extract_account_domain_from_row($row);
 
         $inodes_used = uptime_monitor_parse_non_negative_number($row['inodes_used'] ?? null);
         $inodes_limit = uptime_monitor_parse_non_negative_number($row['inodes_limit'] ?? null);
 
-        $inode_by_user[$user] = [
+        $metric = [
             'used'  => $inodes_used === null ? null : (int) round($inodes_used),
             'limit' => ($inodes_limit !== null && $inodes_limit > 0.0) ? (int) round($inodes_limit) : null,
         ];
+        $keys = uptime_monitor_get_account_lookup_keys($user, $domain);
+        uptime_monitor_add_metric_entry($inode_by_user, $keys, $metric);
     }
 
     return $inode_by_user;
