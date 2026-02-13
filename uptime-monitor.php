@@ -3,7 +3,7 @@
 Plugin Name: Uptime Monitor
 Plugin URI: https://github.com/stronganchor/uptime-monitor/
 Description: A plugin to monitor URLs and report their HTTP status and display server stats.
-Version: 1.1.2
+Version: 1.1.3
 Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
 */
@@ -39,14 +39,24 @@ function uptime_monitor_get_mainwp_from_email() {
 
 // Step 2: Settings page form for whm credentials + MainWP from-email override
 function uptime_monitor_settings_page() {
+    if (!current_user_can('manage_options')) {
+        return;
+    }
+
     if (isset($_POST['save_settings'])) {
+        check_admin_referer('uptime_monitor_save_settings', 'uptime_monitor_settings_nonce');
+
         // WHM settings
-        update_option('uptime_monitor_whm_user', sanitize_text_field($_POST['whm_user']));
-        update_option('uptime_monitor_whm_api_token', sanitize_text_field($_POST['whm_api_token']));
-        update_option('uptime_monitor_whm_server_url', sanitize_text_field($_POST['whm_server_url']));
+        $whm_user       = isset($_POST['whm_user']) ? sanitize_text_field(wp_unslash($_POST['whm_user'])) : '';
+        $whm_api_token  = isset($_POST['whm_api_token']) ? sanitize_text_field(wp_unslash($_POST['whm_api_token'])) : '';
+        $whm_server_url = isset($_POST['whm_server_url']) ? sanitize_text_field(wp_unslash($_POST['whm_server_url'])) : '';
+
+        update_option('uptime_monitor_whm_user', $whm_user);
+        update_option('uptime_monitor_whm_api_token', $whm_api_token);
+        update_option('uptime_monitor_whm_server_url', $whm_server_url);
 
         // MainWP From Email override
-        $mainwp_from_email = isset($_POST['mainwp_from_email']) ? sanitize_email($_POST['mainwp_from_email']) : '';
+        $mainwp_from_email = isset($_POST['mainwp_from_email']) ? sanitize_email(wp_unslash($_POST['mainwp_from_email'])) : '';
         update_option('uptime_monitor_mainwp_from_email', $mainwp_from_email);
 
         echo '<div class="notice notice-success"><p>Settings saved!</p></div>';
@@ -59,7 +69,8 @@ function uptime_monitor_settings_page() {
 
     echo '<div class="wrap">';
     echo '<h1>Uptime Monitor Settings</h1>';
-    echo '<form method="post">';
+    echo '<form method="post" action="' . esc_url(admin_url('admin.php?page=uptime-monitor-settings')) . '">';
+    wp_nonce_field('uptime_monitor_save_settings', 'uptime_monitor_settings_nonce');
     echo '<table class="form-table">';
 
     // WHM fields
@@ -95,9 +106,9 @@ function uptime_monitor_settings_page() {
 
 // Step 3: Fetch server stats from the whm API
 function get_whm_server_stats() {
-    $whm_user = get_option('uptime_monitor_cpanel_user'); // Your WHM username
-    $whm_api_token = get_option('uptime_monitor_cpanel_api_token'); // Your WHM API token
-    $server_url = get_option('uptime_monitor_cpanel_server_url');
+    $whm_user      = get_option('uptime_monitor_whm_user'); // Your WHM username
+    $whm_api_token = get_option('uptime_monitor_whm_api_token'); // Your WHM API token
+    $server_url    = get_option('uptime_monitor_whm_server_url');
 
     if (empty($whm_user) || empty($whm_api_token) || empty($server_url)) {
         return 'Please configure the WHM credentials in the Uptime Monitor settings.';
@@ -190,6 +201,10 @@ function get_whm_account_list($whm_user, $whm_api_token, $server_url) {
 
 // Step 4: Display server stats at the top of the Uptime Monitor page
 function uptime_monitor_page() {
+    if (!current_user_can('manage_options')) {
+        return;
+    }
+
     echo '<div class="wrap">';
     echo '<h1>Uptime Monitor</h1>';
 
@@ -199,6 +214,8 @@ function uptime_monitor_page() {
     echo '<p>' . wp_kses_post($server_stats) . '</p>';
 
     if (isset($_POST['check_all_sites'])) {
+        check_admin_referer('uptime_monitor_check_all_sites', 'uptime_monitor_check_all_sites_nonce');
+
         $sites = uptime_monitor_get_mainwp_sites();
         $failed_sites = [];
 
@@ -217,26 +234,39 @@ function uptime_monitor_page() {
     }
 
     if (isset($_POST['update_keyword'])) {
-        $site    = sanitize_text_field($_POST['site']);
-        $keyword = sanitize_text_field($_POST['keyword']);
-        $keywords = get_option('uptime_monitor_keywords', []);
-        $keywords[$site] = $keyword;
-        update_option('uptime_monitor_keywords', $keywords);
+        check_admin_referer('uptime_monitor_update_keyword', 'uptime_monitor_update_keyword_nonce');
 
-        uptime_monitor_perform_check($site);
+        $site    = isset($_POST['site']) ? esc_url_raw(wp_unslash($_POST['site'])) : '';
+        $keyword = isset($_POST['keyword']) ? sanitize_text_field(wp_unslash($_POST['keyword'])) : '';
 
-        $result = uptime_monitor_check_status($site);
-        if (strpos($result['status'], 'Error') !== false || $result['keyword_match'] === 'No match found') {
-            $failed_sites = [
-                $site => $result['status'] . ' - ' . $result['keyword_match'],
-            ];
-            uptime_monitor_send_notification($failed_sites);
+        if (empty($site)) {
+            echo '<div class="notice notice-error"><p>Unable to update keyword: invalid site URL.</p></div>';
+        } else {
+            $keywords = get_option('uptime_monitor_keywords', []);
+            $keywords[$site] = $keyword;
+            update_option('uptime_monitor_keywords', $keywords);
+
+            uptime_monitor_perform_check($site);
+
+            $result = uptime_monitor_check_status($site);
+            if (strpos($result['status'], 'Error') !== false || $result['keyword_match'] === 'No match found') {
+                $failed_sites = [
+                    $site => $result['status'] . ' - ' . $result['keyword_match'],
+                ];
+                uptime_monitor_send_notification($failed_sites);
+            }
         }
     }
 
     if (isset($_POST['recheck_site'])) {
-        $site = sanitize_text_field($_POST['site']);
-        uptime_monitor_perform_check($site);
+        check_admin_referer('uptime_monitor_recheck_site', 'uptime_monitor_recheck_site_nonce');
+
+        $site = isset($_POST['site']) ? esc_url_raw(wp_unslash($_POST['site'])) : '';
+        if (!empty($site)) {
+            uptime_monitor_perform_check($site);
+        } else {
+            echo '<div class="notice notice-error"><p>Unable to recheck: invalid site URL.</p></div>';
+        }
     }
 
     $sites        = uptime_monitor_get_mainwp_sites(true);
@@ -266,7 +296,8 @@ function uptime_monitor_page() {
         }
     });
 
-    echo '<form method="post" style="display: inline;">';
+    echo '<form method="post" action="' . esc_url(admin_url('admin.php?page=uptime-monitor')) . '" style="display: inline;">';
+    wp_nonce_field('uptime_monitor_check_all_sites', 'uptime_monitor_check_all_sites_nonce');
     echo '<input type="submit" name="check_all_sites" class="button button-primary" value="Check All Sites">';
     echo '</form>';
 
@@ -294,7 +325,8 @@ function uptime_monitor_page() {
         echo '<td class="' . $status_class . '">' . esc_html($status) . '</td>';
         echo '<td class="' . $keyword_class . '">' . esc_html($keyword_match) . '</td>';
         echo '<td>';
-        echo '<form method="post" style="display: inline;">';
+        echo '<form method="post" action="' . esc_url(admin_url('admin.php?page=uptime-monitor')) . '" style="display: inline;">';
+        wp_nonce_field('uptime_monitor_update_keyword', 'uptime_monitor_update_keyword_nonce');
         echo '<input type="hidden" name="site" value="' . esc_attr($site_url) . '">';
         echo '<input type="text" name="keyword" value="' . esc_attr($custom_keyword) . '">';
         echo '<input type="submit" name="update_keyword" class="button button-secondary" value="Update">';
@@ -302,7 +334,8 @@ function uptime_monitor_page() {
         echo '</td>';
         echo '<td>' . esc_html($last_checked_time) . '</td>';
         echo '<td>';
-        echo '<form method="post" style="display: inline;">';
+        echo '<form method="post" action="' . esc_url(admin_url('admin.php?page=uptime-monitor')) . '" style="display: inline;">';
+        wp_nonce_field('uptime_monitor_recheck_site', 'uptime_monitor_recheck_site_nonce');
         echo '<input type="hidden" name="site" value="' . esc_attr($site_url) . '">';
         echo '<input type="submit" name="recheck_site" class="button button-secondary" value="Recheck">';
         echo '</form>';
