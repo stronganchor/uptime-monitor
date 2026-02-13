@@ -430,11 +430,22 @@ function uptime_monitor_build_sparkline_points($values, $width = 180, $height = 
         $range = 1.0;
     }
 
+    // Keep the sparkline stroke comfortably inside the SVG viewport.
+    $padding = 2.0;
+    $x_min = $padding;
+    $x_max = max($padding, ((float) $width) - $padding);
+    $y_min = $padding;
+    $y_max = max($padding, ((float) $height) - $padding);
+    $draw_width = max(0.0001, $x_max - $x_min);
+    $draw_height = max(0.0001, $y_max - $y_min);
+
     $points = [];
     $count = count($values);
     foreach ($values as $index => $value) {
-        $x = $count > 1 ? (($index / ($count - 1)) * ($width - 1)) : 0.0;
-        $y = ($height - 1) - ((($value - $min) / $range) * ($height - 1));
+        $x = $count > 1
+            ? ($x_min + (($index / ($count - 1)) * $draw_width))
+            : (($x_min + $x_max) / 2.0);
+        $y = $y_max - ((($value - $min) / $range) * $draw_height);
         $points[] = number_format($x, 2, '.', '') . ',' . number_format($y, 2, '.', '');
     }
 
@@ -730,15 +741,21 @@ function uptime_monitor_render_server_stats($stats) {
     }
 
     $trend_avg_hidden = $trend_avg === null ? ' style="display:none;"' : '';
+    $trend_avg_core_text = uptime_monitor_format_load_core_text($trend_avg, $cpu_cores);
+    $trend_avg_core_class = $trend_avg_core_text === '' ? 'uptime-monitor-load-pill-core is-hidden' : 'uptime-monitor-load-pill-core';
     echo '<span class="uptime-monitor-load-pill" data-load-pill="trend_avg"' . $trend_avg_hidden . '>';
         echo '<span class="uptime-monitor-load-pill-label">24h avg</span>';
     echo '<span class="uptime-monitor-load-pill-value">' . esc_html(uptime_monitor_format_load_value($trend_avg)) . '</span>';
+    echo '<span class="' . esc_attr($trend_avg_core_class) . '" data-load-pill-core>' . esc_html($trend_avg_core_text) . '</span>';
     echo '</span>';
 
     $trend_peak_hidden = $trend_peak === null ? ' style="display:none;"' : '';
+    $trend_peak_core_text = uptime_monitor_format_load_core_text($trend_peak, $cpu_cores);
+    $trend_peak_core_class = $trend_peak_core_text === '' ? 'uptime-monitor-load-pill-core is-hidden' : 'uptime-monitor-load-pill-core';
     echo '<span class="uptime-monitor-load-pill" data-load-pill="trend_peak"' . $trend_peak_hidden . '>';
         echo '<span class="uptime-monitor-load-pill-label">24h peak</span>';
     echo '<span class="uptime-monitor-load-pill-value">' . esc_html(uptime_monitor_format_load_value($trend_peak)) . '</span>';
+    echo '<span class="' . esc_attr($trend_peak_core_class) . '" data-load-pill-core>' . esc_html($trend_peak_core_text) . '</span>';
     echo '</span>';
 
     echo '</div>';
@@ -981,11 +998,13 @@ function uptime_monitor_ajax_get_live_load() {
             'trend_avg' => [
                 'display' => uptime_monitor_format_load_value($trend['avg_five'] ?? null),
                 'level'   => uptime_monitor_get_load_level($trend['avg_five'] ?? null, $cpu_cores),
+                'core_display' => uptime_monitor_format_load_core_text($trend['avg_five'] ?? null, $cpu_cores),
                 'hidden'  => !isset($trend['avg_five']) || $trend['avg_five'] === null,
             ],
             'trend_peak' => [
                 'display' => uptime_monitor_format_load_value($trend['peak_five'] ?? null),
                 'level'   => uptime_monitor_get_load_level($trend['peak_five'] ?? null, $cpu_cores),
+                'core_display' => uptime_monitor_format_load_core_text($trend['peak_five'] ?? null, $cpu_cores),
                 'hidden'  => !isset($trend['peak_five']) || $trend['peak_five'] === null,
             ],
         ],
