@@ -3,7 +3,7 @@
 Plugin Name: Uptime Monitor
 Plugin URI: https://github.com/stronganchor/uptime-monitor/
 Description: A plugin to monitor URLs and report their HTTP status and display server stats.
-Version: 1.1.7
+Version: 1.1.8
 Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
 */
@@ -1570,6 +1570,19 @@ function uptime_monitor_ajax_get_live_load() {
     $cpu_source_text = ($cpu_source === 'manual') ? 'manual' : (($cpu_source === 'auto') ? 'auto' : 'unknown');
     $cpu_status_text = $cpu_cores ? ($cpu_cores . ' cores (' . $cpu_source_text . ')') : 'CPU cores unknown';
 
+    $sites = uptime_monitor_get_mainwp_sites();
+    $results = get_option('uptime_monitor_results', []);
+    if (!is_array($results)) {
+        $results = [];
+    }
+
+    $sites_down = 0;
+    foreach ($sites as $site_url) {
+        if (uptime_monitor_result_is_down($results[$site_url] ?? [])) {
+            $sites_down++;
+        }
+    }
+
     wp_send_json_success([
         'status' => [
             'level' => $load_level,
@@ -1613,6 +1626,10 @@ function uptime_monitor_ajax_get_live_load() {
         ],
         'cpu' => [
             'text' => $cpu_status_text,
+        ],
+        'sites' => [
+            'total' => count($sites),
+            'down'  => $sites_down,
         ],
         'warning' => '',
     ]);
@@ -1731,6 +1748,16 @@ function uptime_monitor_page() {
             return strcasecmp($site_url_a, $site_url_b);
         }
     });
+
+    $site_down_count = 0;
+    foreach ($sites as $site_info) {
+        $site_url = isset($site_info['site_url']) ? (string) $site_info['site_url'] : '';
+        if ($site_url !== '' && uptime_monitor_result_is_down($results[$site_url] ?? [])) {
+            $site_down_count++;
+        }
+    }
+
+    echo '<div id="uptime-monitor-tabicon-state" hidden data-sites-total="' . esc_attr(count($sites)) . '" data-sites-down="' . esc_attr($site_down_count) . '"></div>';
 
     echo '<form method="post" action="' . esc_url(admin_url('admin.php?page=uptime-monitor')) . '" style="display: inline;">';
     wp_nonce_field('uptime_monitor_check_all_sites', 'uptime_monitor_check_all_sites_nonce');
@@ -2175,6 +2202,226 @@ function uptime_monitor_enqueue_disk_graph_script() {
 
     echo '<script>
     (function() {
+        var stateNode = document.getElementById("uptime-monitor-tabicon-state");
+        var strip = document.querySelector(".uptime-monitor-load-strip[data-load-refresh=\"1\"]");
+        var head = document.head || document.getElementsByTagName("head")[0];
+        var iconState = {
+            sitesDown: 0,
+            sitesTotal: 0,
+            loadLevel: "unknown",
+            loadFive: null
+        };
+
+        var parseInteger = function(value) {
+            var parsed = parseInt(value, 10);
+            return Number.isFinite(parsed) ? parsed : 0;
+        };
+
+        var parseNumber = function(value) {
+            if (value === null || typeof value === "undefined") {
+                return null;
+            }
+            var text = String(value).trim();
+            if (!text) {
+                return null;
+            }
+            var parsed = parseFloat(text);
+            return Number.isFinite(parsed) ? parsed : null;
+        };
+
+        if (stateNode) {
+            iconState.sitesDown = Math.max(0, parseInteger(stateNode.getAttribute("data-sites-down")));
+            iconState.sitesTotal = Math.max(0, parseInteger(stateNode.getAttribute("data-sites-total")));
+        }
+
+        var readLoadFromDom = function() {
+            if (!strip) {
+                return;
+            }
+
+            var statusNode = strip.querySelector("[data-load-status]");
+            if (statusNode) {
+                var className = statusNode.className || "";
+                var match = className.match(/uptime-monitor-load-status-(healthy|elevated|high|unknown)/);
+                iconState.loadLevel = (match && match[1]) ? match[1] : "unknown";
+            }
+
+            var fiveValueNode = strip.querySelector("[data-load-pill=\"five\"] .uptime-monitor-load-pill-value");
+            iconState.loadFive = fiveValueNode ? parseNumber(fiveValueNode.textContent) : null;
+        };
+
+        var ensureIconLinks = function() {
+            if (!head) {
+                return [];
+            }
+
+            var links = Array.prototype.slice.call(document.querySelectorAll("link[rel~=\"icon\"]"));
+            if (!links.length) {
+                var link = document.createElement("link");
+                link.setAttribute("rel", "icon");
+                head.appendChild(link);
+                links = [link];
+            }
+
+            return links;
+        };
+
+        var roundRect = function(ctx, x, y, width, height, radius) {
+            var r = Math.max(0, Math.min(radius, width / 2, height / 2));
+            ctx.beginPath();
+            ctx.moveTo(x + r, y);
+            ctx.arcTo(x + width, y, x + width, y + height, r);
+            ctx.arcTo(x + width, y + height, x, y + height, r);
+            ctx.arcTo(x, y + height, x, y, r);
+            ctx.arcTo(x, y, x + width, y, r);
+            ctx.closePath();
+        };
+
+        var loadColorMap = {
+            healthy: "#15803d",
+            elevated: "#ea580c",
+            high: "#dc2626",
+            unknown: "#6b7280"
+        };
+
+        var getLoadText = function(value) {
+            if (typeof value !== "number" || !Number.isFinite(value)) {
+                return "UM";
+            }
+
+            if (value >= 100) {
+                return "99";
+            }
+            if (value >= 10) {
+                return String(Math.round(value));
+            }
+
+            var text = value.toFixed(1);
+            return text.replace(/\\.0$/, "");
+        };
+
+        var getDownText = function(count) {
+            if (count > 9) {
+                return "9+";
+            }
+            return String(Math.max(0, count));
+        };
+
+        var setFaviconDataUrl = function(dataUrl) {
+            var links = ensureIconLinks();
+            links.forEach(function(link) {
+                link.setAttribute("href", dataUrl);
+                link.setAttribute("type", "image/png");
+            });
+        };
+
+        var drawIcon = function() {
+            var canvas = document.createElement("canvas");
+            canvas.width = 32;
+            canvas.height = 32;
+
+            var ctx = canvas.getContext("2d");
+            if (!ctx) {
+                return;
+            }
+
+            ctx.clearRect(0, 0, 32, 32);
+
+            if (iconState.sitesDown > 0) {
+                var downText = getDownText(iconState.sitesDown);
+                ctx.fillStyle = "#d63638";
+                ctx.beginPath();
+                ctx.arc(16, 16, 14, 0, Math.PI * 2);
+                ctx.fill();
+
+                ctx.lineWidth = 2;
+                ctx.strokeStyle = "rgba(255,255,255,0.85)";
+                ctx.stroke();
+
+                ctx.fillStyle = "#ffffff";
+                ctx.textAlign = "center";
+                ctx.textBaseline = "middle";
+                ctx.font = "700 " + (downText.length > 1 ? 13 : 16) + "px sans-serif";
+                ctx.fillText(downText, 16, 16.5);
+            } else {
+                var level = loadColorMap[iconState.loadLevel] ? iconState.loadLevel : "unknown";
+                var loadText = getLoadText(iconState.loadFive);
+
+                ctx.fillStyle = loadColorMap[level];
+                roundRect(ctx, 2, 2, 28, 28, 8);
+                ctx.fill();
+
+                ctx.lineWidth = 2;
+                ctx.strokeStyle = "rgba(255,255,255,0.85)";
+                ctx.stroke();
+
+                ctx.fillStyle = "#ffffff";
+                ctx.textAlign = "center";
+                ctx.textBaseline = "middle";
+                ctx.font = "700 " + (loadText.length >= 3 ? 12 : 14) + "px sans-serif";
+                ctx.fillText(loadText, 16, 16.5);
+            }
+
+            try {
+                setFaviconDataUrl(canvas.toDataURL("image/png"));
+            } catch (error) {
+                return;
+            }
+        };
+
+        var applyPayload = function(data) {
+            if (!data) {
+                return;
+            }
+
+            if (data.status && data.status.level) {
+                iconState.loadLevel = String(data.status.level);
+            }
+
+            if (data.metrics && data.metrics.five) {
+                iconState.loadFive = parseNumber(data.metrics.five.raw);
+                if (iconState.loadFive === null) {
+                    iconState.loadFive = parseNumber(data.metrics.five.display);
+                }
+            }
+
+            if (data.sites) {
+                if (typeof data.sites.down !== "undefined") {
+                    iconState.sitesDown = Math.max(0, parseInteger(data.sites.down));
+                    if (stateNode) {
+                        stateNode.setAttribute("data-sites-down", String(iconState.sitesDown));
+                    }
+                }
+                if (typeof data.sites.total !== "undefined") {
+                    iconState.sitesTotal = Math.max(0, parseInteger(data.sites.total));
+                    if (stateNode) {
+                        stateNode.setAttribute("data-sites-total", String(iconState.sitesTotal));
+                    }
+                }
+            }
+
+            drawIcon();
+        };
+
+        readLoadFromDom();
+        drawIcon();
+
+        window.uptimeMonitorTabIcon = {
+            applyPayload: applyPayload,
+            refreshFromDom: function() {
+                readLoadFromDom();
+                if (stateNode) {
+                    iconState.sitesDown = Math.max(0, parseInteger(stateNode.getAttribute("data-sites-down")));
+                    iconState.sitesTotal = Math.max(0, parseInteger(stateNode.getAttribute("data-sites-total")));
+                }
+                drawIcon();
+            }
+        };
+    })();
+    </script>';
+
+    echo '<script>
+    (function() {
         var strip = document.querySelector(".uptime-monitor-load-strip[data-load-refresh=\"1\"]");
         if (!strip) {
             return;
@@ -2282,6 +2529,10 @@ function uptime_monitor_enqueue_disk_graph_script() {
                 var warningText = data.warning || "";
                 warningNode.textContent = warningText;
                 warningNode.classList.toggle("is-hidden", !warningText);
+            }
+
+            if (window.uptimeMonitorTabIcon && typeof window.uptimeMonitorTabIcon.applyPayload === "function") {
+                window.uptimeMonitorTabIcon.applyPayload(data);
             }
         };
 
@@ -2396,6 +2647,17 @@ function uptime_monitor_get_mainwp_sites($get_tags = false) {
     }
 
     return $mainwp_sites;
+}
+
+function uptime_monitor_result_is_down($result) {
+    if (!is_array($result)) {
+        return false;
+    }
+
+    $status = isset($result['status']) ? (string) $result['status'] : '';
+    $keyword_match = isset($result['keyword_match']) ? (string) $result['keyword_match'] : '';
+
+    return (strpos($status, 'Error') !== false || $keyword_match === 'No match found');
 }
 
 function uptime_monitor_check_status($url, $retry_count = 1, $retry_delay = 0) {
