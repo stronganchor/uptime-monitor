@@ -3,7 +3,7 @@
 Plugin Name: Uptime Monitor
 Plugin URI: https://github.com/stronganchor/uptime-monitor/
 Description: A plugin to monitor URLs and report their HTTP status and display server stats.
-Version: 1.1.6
+Version: 1.1.7
 Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
 */
@@ -2398,9 +2398,14 @@ function uptime_monitor_get_mainwp_sites($get_tags = false) {
     return $mainwp_sites;
 }
 
-function uptime_monitor_check_status($url, $retry_count = 3, $retry_delay = 5) {
+function uptime_monitor_check_status($url, $retry_count = 1, $retry_delay = 0) {
+    $retry_count = max(1, (int) $retry_count);
+
+    // Kept for backward compatibility with existing calls/overrides; retries no longer sleep.
+
     $args = [
-        'timeout' => 15,
+        'timeout'   => 12,
+        'sslverify' => true,
     ];
 
     $keywords = get_option('uptime_monitor_keywords', []);
@@ -2426,12 +2431,7 @@ function uptime_monitor_check_status($url, $retry_count = 3, $retry_delay = 5) {
             $status_code    = wp_remote_retrieve_response_code($response);
             $status_message = wp_remote_retrieve_response_message($response);
 
-            $ssl_valid = uptime_monitor_check_ssl($url);
-            $status = ($status_code === 200 && $ssl_valid) ? "OK ($status_code)" : "Error ($status_code): $status_message";
-
-            if (!$ssl_valid) {
-                $status .= " - SSL Certificate Error";
-            }
+            $status = ($status_code === 200) ? "OK ($status_code)" : "Error ($status_code): $status_message";
 
             $keyword_match = 'No match found';
             $site_title    = 'N/A';
@@ -2439,10 +2439,15 @@ function uptime_monitor_check_status($url, $retry_count = 3, $retry_delay = 5) {
             if ($status_code === 200) {
                 $page_content = wp_remote_retrieve_body($response);
 
-                $visible_text = extract_visible_text($page_content);
+                if (preg_match('/<title>(.*?)<\/title>/is', $page_content, $matches)) {
+                    $site_title = trim(wp_strip_all_tags(html_entity_decode($matches[1], ENT_QUOTES, 'UTF-8')));
+                }
 
                 if (!empty($custom_keyword)) {
-                    if (preg_match("/{$custom_keyword}/i", $visible_text, $matches)) {
+                    $visible_text = extract_visible_text($page_content);
+                    $quoted_keyword = preg_quote($custom_keyword, '/');
+
+                    if ($quoted_keyword !== '' && preg_match("/{$quoted_keyword}/i", $visible_text, $matches)) {
                         $keyword_match = $matches[0];
                     }
                 } else {
@@ -2453,26 +2458,27 @@ function uptime_monitor_check_status($url, $retry_count = 3, $retry_delay = 5) {
                     $pattern = str_split($base_domain);
                     $pattern = implode('\s*', $pattern);
 
-                    if (preg_match("/{$pattern}/i", $visible_text, $matches)) {
+                    // Prefer <title> before full visible text to reduce false alerts on JS-heavy pages.
+                    if (!empty($site_title) && preg_match("/{$pattern}/i", $site_title, $matches)) {
                         $keyword_match = $matches[0];
-                    }
-                }
+                    } else {
+                        $visible_text = extract_visible_text($page_content);
 
-                if (preg_match('/<title>(.*?)<\/title>/i', $page_content, $matches)) {
-                    $site_title = $matches[1];
+                        if (preg_match("/{$pattern}/i", $visible_text, $matches)) {
+                            $keyword_match = $matches[0];
+                        }
+                    }
                 }
             }
         }
 
-        if (strpos($status, 'Error') === false && $keyword_match !== 'No match found' && $ssl_valid) {
+        if (strpos($status, 'Error') === false && $keyword_match !== 'No match found') {
             return [
                 'status'        => $status,
                 'keyword_match' => $keyword_match,
                 'site_title'    => $site_title,
             ];
         }
-
-        sleep($retry_delay);
     }
 
     return [
@@ -2496,29 +2502,6 @@ function extract_visible_text($html) {
     }
 
     return $visible_text;
-}
-
-function uptime_monitor_check_ssl($url) {
-    $parsed_url = parse_url($url);
-    $host = $parsed_url['host'];
-    $port = isset($parsed_url['port']) ? $parsed_url['port'] : 443;
-
-    $context = stream_context_create([
-        'ssl' => [
-            'verify_peer'      => true,
-            'verify_peer_name' => true,
-            'peer_name'        => $host,
-        ],
-    ]);
-
-    $stream = @stream_socket_client("ssl://$host:$port", $errno, $errstr, 30, STREAM_CLIENT_CONNECT, $context);
-
-    if ($stream === false) {
-        return false;
-    } else {
-        fclose($stream);
-        return true;
-    }
 }
 
 function uptime_monitor_schedule_task() {
@@ -2565,11 +2548,10 @@ function uptime_monitor_perform_hourly_check() {
     $failed_sites = [];
 
     foreach ($sites as $site) {
-        uptime_monitor_perform_check($site);
-        $result = uptime_monitor_check_status($site);
+        $result = uptime_monitor_perform_check($site);
 
         if (strpos($result['status'], 'Error') !== false || $result['keyword_match'] === 'No match found') {
-            $failed_sites[$site] = $result['status'] . ' - $result[\"keyword_match\"]';
+            $failed_sites[$site] = $result['status'] . ' - ' . $result['keyword_match'];
         }
     }
 
@@ -2587,6 +2569,8 @@ function uptime_monitor_perform_check($site) {
     $last_checked[$site] = current_time('timestamp');
     update_option('uptime_monitor_results', $results);
     update_option('uptime_monitor_last_checked', $last_checked);
+
+    return $result;
 }
 
 function uptime_monitor_send_notification($failed_sites) {
