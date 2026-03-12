@@ -3,7 +3,7 @@
 Plugin Name: Uptime Monitor
 Plugin URI: https://github.com/stronganchor/uptime-monitor/
 Description: A plugin to monitor URLs and report their HTTP status and display server stats.
-Version: 1.1.9
+Version: 1.1.10
 Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
 */
@@ -48,6 +48,15 @@ function uptime_monitor_get_mainwp_from_email() {
 
 function uptime_monitor_get_current_admin_page() {
     return isset($_GET['page']) ? sanitize_key(wp_unslash($_GET['page'])) : '';
+}
+
+function uptime_monitor_normalize_plugin_file_key($plugin_file) {
+    if (!is_scalar($plugin_file)) {
+        return '';
+    }
+
+    $plugin_file = ltrim(trim((string) $plugin_file), '/');
+    return $plugin_file === '' ? '' : $plugin_file;
 }
 
 function uptime_monitor_decode_json_array($value) {
@@ -103,6 +112,101 @@ function uptime_monitor_get_plugin_candidate_slug($plugin_file) {
     $candidate = count($parts) > 1 ? $parts[0] : preg_replace('/\.php$/i', '', $parts[0]);
 
     return sanitize_title($candidate);
+}
+
+function uptime_monitor_get_wporg_plugin_page_url($plugin_slug) {
+    $plugin_slug = sanitize_title($plugin_slug);
+    if ($plugin_slug === '') {
+        return '';
+    }
+
+    return esc_url_raw('https://wordpress.org/plugins/' . rawurlencode($plugin_slug) . '/');
+}
+
+function uptime_monitor_format_wporg_closed_date($value) {
+    $value = trim((string) $value);
+    if ($value === '') {
+        return '';
+    }
+
+    $timestamp = strtotime($value . ' 00:00:00 UTC');
+    if ($timestamp === false) {
+        return uptime_monitor_clean_plugin_text($value);
+    }
+
+    return gmdate('F j, Y', $timestamp);
+}
+
+function uptime_monitor_get_hidden_plugin_report_items() {
+    $stored = get_option('uptime_monitor_hidden_plugin_report_items', []);
+    if (!is_array($stored)) {
+        return [];
+    }
+
+    $hidden = [];
+    foreach ($stored as $plugin_file => $item) {
+        $normalized_file = uptime_monitor_normalize_plugin_file_key($plugin_file);
+        if ($normalized_file === '') {
+            continue;
+        }
+
+        $item = is_array($item) ? $item : [];
+        $hidden[$normalized_file] = [
+            'plugin_file' => $normalized_file,
+            'name'        => isset($item['name']) ? uptime_monitor_clean_plugin_text($item['name']) : '',
+            'candidate'   => isset($item['candidate']) ? sanitize_title($item['candidate']) : '',
+            'hidden_at'   => isset($item['hidden_at']) ? absint($item['hidden_at']) : 0,
+        ];
+    }
+
+    ksort($hidden, SORT_NATURAL);
+    return $hidden;
+}
+
+function uptime_monitor_save_hidden_plugin_report_items($items) {
+    if (!is_array($items)) {
+        $items = [];
+    }
+
+    if (get_option('uptime_monitor_hidden_plugin_report_items', null) === null) {
+        add_option('uptime_monitor_hidden_plugin_report_items', $items, '', false);
+    } else {
+        update_option('uptime_monitor_hidden_plugin_report_items', $items);
+    }
+}
+
+function uptime_monitor_hide_plugin_report_item($plugin_file, $name = '', $candidate = '') {
+    $plugin_file = uptime_monitor_normalize_plugin_file_key($plugin_file);
+    if ($plugin_file === '') {
+        return false;
+    }
+
+    $hidden = uptime_monitor_get_hidden_plugin_report_items();
+    $hidden[$plugin_file] = [
+        'plugin_file' => $plugin_file,
+        'name'        => uptime_monitor_clean_plugin_text($name),
+        'candidate'   => sanitize_title($candidate),
+        'hidden_at'   => time(),
+    ];
+
+    uptime_monitor_save_hidden_plugin_report_items($hidden);
+    return true;
+}
+
+function uptime_monitor_unhide_plugin_report_item($plugin_file) {
+    $plugin_file = uptime_monitor_normalize_plugin_file_key($plugin_file);
+    if ($plugin_file === '') {
+        return false;
+    }
+
+    $hidden = uptime_monitor_get_hidden_plugin_report_items();
+    if (!isset($hidden[$plugin_file])) {
+        return false;
+    }
+
+    unset($hidden[$plugin_file]);
+    uptime_monitor_save_hidden_plugin_report_items($hidden);
+    return true;
 }
 
 function uptime_monitor_get_mainwp_sites_for_plugin_report() {
@@ -161,48 +265,84 @@ function uptime_monitor_get_wporg_plugin_lookup($plugin_slug) {
     $plugin_slug = sanitize_title($plugin_slug);
     if ($plugin_slug === '') {
         return [
-            'slug'   => '',
-            'status' => 'error',
-            'error'  => 'Missing plugin slug.',
+            'slug'               => '',
+            'status'             => 'error',
+            'error'              => 'Missing plugin slug.',
+            'name'               => '',
+            'wporg_url'          => '',
+            'closed_date'        => '',
+            'closed_reason'      => '',
+            'closed_reason_text' => '',
         ];
     }
 
-    $cache_key = 'uptime_monitor_wporg_' . md5($plugin_slug);
+    $cache_key = 'uptime_monitor_wporg_v2_' . md5($plugin_slug);
     $cached = get_transient($cache_key);
     if (is_array($cached) && isset($cached['status'])) {
         return $cached;
     }
 
-    if (!function_exists('plugins_api')) {
-        require_once ABSPATH . 'wp-admin/includes/plugin-install.php';
-    }
-
     $lookup = [
-        'slug'   => $plugin_slug,
-        'status' => 'missing',
-        'error'  => '',
-        'name'   => '',
+        'slug'               => $plugin_slug,
+        'status'             => 'missing',
+        'error'              => '',
+        'name'               => '',
+        'wporg_url'          => uptime_monitor_get_wporg_plugin_page_url($plugin_slug),
+        'closed_date'        => '',
+        'closed_reason'      => '',
+        'closed_reason_text' => '',
     ];
 
-    $result = plugins_api(
-        'plugin_information',
+    $api_url = add_query_arg(
         [
-            'slug'   => $plugin_slug,
-            'fields' => [
-                'sections'          => false,
-                'versions'          => false,
-                'banners'           => false,
-                'icons'             => false,
-                'reviews'           => false,
-                'downloaded'        => false,
-                'active_installs'   => false,
-                'short_description' => false,
-            ],
+            'action'        => 'plugin_information',
+            'request[slug]' => $plugin_slug,
+        ],
+        'https://api.wordpress.org/plugins/info/1.2/'
+    );
+    $response = wp_remote_get(
+        $api_url,
+        [
+            'timeout' => 12,
         ]
     );
 
-    if (is_wp_error($result)) {
-        $error_message = $result->get_error_message();
+    if (is_wp_error($response)) {
+        $lookup['status'] = 'error';
+        $lookup['error'] = $response->get_error_message();
+        set_transient($cache_key, $lookup, HOUR_IN_SECONDS);
+        return $lookup;
+    }
+
+    $body = wp_remote_retrieve_body($response);
+    if (!is_string($body) || trim($body) === '') {
+        $lookup['status'] = 'error';
+        $lookup['error'] = 'WordPress.org returned an empty plugin lookup response.';
+        set_transient($cache_key, $lookup, HOUR_IN_SECONDS);
+        return $lookup;
+    }
+
+    $result = json_decode($body, true);
+    if (!is_array($result)) {
+        $lookup['status'] = 'error';
+        $lookup['error'] = 'WordPress.org returned an invalid plugin lookup response.';
+        set_transient($cache_key, $lookup, HOUR_IN_SECONDS);
+        return $lookup;
+    }
+
+    if (!empty($result['error'])) {
+        $error_message = uptime_monitor_clean_plugin_text($result['error']);
+        $error_code = sanitize_key($result['error']);
+        if ($error_code === 'closed' || !empty($result['closed'])) {
+            $lookup['status'] = 'closed';
+            $lookup['name'] = isset($result['name']) ? uptime_monitor_clean_plugin_text($result['name']) : '';
+            $lookup['closed_date'] = isset($result['closed_date']) ? uptime_monitor_clean_plugin_text($result['closed_date']) : '';
+            $lookup['closed_reason'] = isset($result['reason']) ? sanitize_key($result['reason']) : '';
+            $lookup['closed_reason_text'] = isset($result['reason_text']) ? uptime_monitor_clean_plugin_text($result['reason_text']) : '';
+            set_transient($cache_key, $lookup, 7 * DAY_IN_SECONDS);
+            return $lookup;
+        }
+
         $not_found = stripos($error_message, 'not found') !== false || stripos($error_message, 'does not exist') !== false;
         if ($not_found) {
             set_transient($cache_key, $lookup, 7 * DAY_IN_SECONDS);
@@ -215,12 +355,20 @@ function uptime_monitor_get_wporg_plugin_lookup($plugin_slug) {
         return $lookup;
     }
 
-    if (is_object($result)) {
+    if (!empty($result['slug']) || !empty($result['name'])) {
         $lookup['status'] = 'found';
-        $lookup['name'] = isset($result->name) ? uptime_monitor_clean_plugin_text($result->name) : '';
+        $lookup['name'] = isset($result['name']) ? uptime_monitor_clean_plugin_text($result['name']) : '';
+        if (!empty($result['slug'])) {
+            $lookup['slug'] = sanitize_title($result['slug']);
+            $lookup['wporg_url'] = uptime_monitor_get_wporg_plugin_page_url($lookup['slug']);
+        }
+        set_transient($cache_key, $lookup, 7 * DAY_IN_SECONDS);
+        return $lookup;
     }
 
-    set_transient($cache_key, $lookup, 7 * DAY_IN_SECONDS);
+    $lookup['status'] = 'error';
+    $lookup['error'] = 'WordPress.org returned an unexpected plugin lookup response.';
+    set_transient($cache_key, $lookup, HOUR_IN_SECONDS);
     return $lookup;
 }
 
@@ -233,6 +381,7 @@ function uptime_monitor_get_plugin_directory_status($plugin_file, $plugin_update
         ];
     }
 
+    $has_wporg_update_metadata = false;
     if (is_array($plugin_update) && !empty($plugin_update)) {
         $update_meta = isset($plugin_update['update']) && is_array($plugin_update['update']) ? $plugin_update['update'] : [];
         $update_id   = isset($update_meta['id']) && is_scalar($update_meta['id']) ? (string) $update_meta['id'] : '';
@@ -248,15 +397,19 @@ function uptime_monitor_get_plugin_directory_status($plugin_file, $plugin_update
         }
 
         if (strpos($update_id, 'w.org/plugins/') === 0 || strpos($update_url, 'wordpress.org/plugins/') !== false) {
-            return [
-                'status'         => 'wporg',
-                'reason'         => 'update_metadata',
-                'candidate_slug' => uptime_monitor_get_plugin_candidate_slug($plugin_file),
-            ];
+            $has_wporg_update_metadata = true;
         }
     }
 
     $candidate_slug = uptime_monitor_get_plugin_candidate_slug($plugin_file);
+    if ($candidate_slug === '' && $has_wporg_update_metadata) {
+        return [
+            'status'         => 'wporg',
+            'reason'         => 'update_metadata',
+            'candidate_slug' => $candidate_slug,
+        ];
+    }
+
     $lookup = uptime_monitor_get_wporg_plugin_lookup($candidate_slug);
 
     if ($lookup['status'] === 'found') {
@@ -271,6 +424,27 @@ function uptime_monitor_get_plugin_directory_status($plugin_file, $plugin_update
         return [
             'status'         => 'off-directory',
             'reason'         => 'lookup_missing',
+            'candidate_slug' => $candidate_slug,
+        ];
+    }
+
+    if ($lookup['status'] === 'closed') {
+        return [
+            'status'             => 'off-directory',
+            'reason'             => 'lookup_closed',
+            'candidate_slug'     => $candidate_slug,
+            'wporg_name'         => isset($lookup['name']) ? (string) $lookup['name'] : '',
+            'wporg_url'          => isset($lookup['wporg_url']) ? (string) $lookup['wporg_url'] : '',
+            'closed_date'        => isset($lookup['closed_date']) ? (string) $lookup['closed_date'] : '',
+            'closed_reason'      => isset($lookup['closed_reason']) ? (string) $lookup['closed_reason'] : '',
+            'closed_reason_text' => isset($lookup['closed_reason_text']) ? (string) $lookup['closed_reason_text'] : '',
+        ];
+    }
+
+    if ($has_wporg_update_metadata) {
+        return [
+            'status'         => 'wporg',
+            'reason'         => 'update_metadata_fallback',
             'candidate_slug' => $candidate_slug,
         ];
     }
@@ -650,20 +824,27 @@ function uptime_monitor_build_off_directory_plugin_report($allow_remote_fetch = 
 
         if (!isset($grouped[$plugin_file])) {
             $grouped[$plugin_file] = [
-                'plugin_file'  => $plugin_file,
-                'name'         => $metadata['name'] !== '' ? $metadata['name'] : $plugin_file,
-                'versions'     => [],
-                'sites'        => [],
-                'author_links' => [],
-                'plugin_uris'  => [],
-                'reasons'      => [],
-                'candidate'    => $match['directory_status']['candidate_slug'] ?? '',
-                'has_mu'       => !empty($metadata['mu']),
+                'plugin_file'         => $plugin_file,
+                'name'                => $metadata['name'] !== '' ? $metadata['name'] : $plugin_file,
+                'versions'            => [],
+                'sites'               => [],
+                'author_links'        => [],
+                'plugin_uris'         => [],
+                'reasons'             => [],
+                'candidate'           => $match['directory_status']['candidate_slug'] ?? '',
+                'has_mu'              => !empty($metadata['mu']),
+                'wporg_closed'        => false,
+                'wporg_closed_date'   => '',
+                'wporg_closed_reason' => '',
+                'wporg_closed_link'   => '',
             ];
         }
 
         if ($grouped[$plugin_file]['name'] === $plugin_file && $metadata['name'] !== '') {
             $grouped[$plugin_file]['name'] = $metadata['name'];
+        }
+        if ($grouped[$plugin_file]['name'] === $plugin_file && !empty($match['directory_status']['wporg_name'])) {
+            $grouped[$plugin_file]['name'] = uptime_monitor_clean_plugin_text($match['directory_status']['wporg_name']);
         }
 
         $version = $metadata['version'] !== '' ? $metadata['version'] : 'Unknown';
@@ -690,6 +871,18 @@ function uptime_monitor_build_off_directory_plugin_report($allow_remote_fetch = 
         $grouped[$plugin_file]['plugin_uris'] = uptime_monitor_collect_unique_text($grouped[$plugin_file]['plugin_uris'], $metadata['plugin_uri']);
         $grouped[$plugin_file]['reasons'] = uptime_monitor_collect_unique_text($grouped[$plugin_file]['reasons'], $match['directory_status']['reason'] ?? '');
         $grouped[$plugin_file]['has_mu'] = $grouped[$plugin_file]['has_mu'] || !empty($metadata['mu']);
+        if (($match['directory_status']['reason'] ?? '') === 'lookup_closed') {
+            $grouped[$plugin_file]['wporg_closed'] = true;
+            if ($grouped[$plugin_file]['wporg_closed_date'] === '' && !empty($match['directory_status']['closed_date'])) {
+                $grouped[$plugin_file]['wporg_closed_date'] = (string) $match['directory_status']['closed_date'];
+            }
+            if ($grouped[$plugin_file]['wporg_closed_reason'] === '' && !empty($match['directory_status']['closed_reason_text'])) {
+                $grouped[$plugin_file]['wporg_closed_reason'] = (string) $match['directory_status']['closed_reason_text'];
+            }
+            if ($grouped[$plugin_file]['wporg_closed_link'] === '' && !empty($match['directory_status']['wporg_url'])) {
+                $grouped[$plugin_file]['wporg_closed_link'] = (string) $match['directory_status']['wporg_url'];
+            }
+        }
     }
 
     foreach ($grouped as &$group) {
@@ -730,6 +923,35 @@ function uptime_monitor_plugin_report_page() {
     }
 
     $refresh_metadata = false;
+    $action_notice = '';
+    $action_notice_class = 'notice-success';
+
+    if (isset($_POST['hide_plugin_report_item'])) {
+        check_admin_referer('uptime_monitor_hide_plugin_report_item', 'uptime_monitor_hide_plugin_report_item_nonce');
+
+        $plugin_file = isset($_POST['plugin_file']) ? uptime_monitor_normalize_plugin_file_key(wp_unslash($_POST['plugin_file'])) : '';
+        $plugin_name = isset($_POST['plugin_name']) ? sanitize_text_field(wp_unslash($_POST['plugin_name'])) : '';
+        $candidate = isset($_POST['plugin_candidate']) ? sanitize_title(wp_unslash($_POST['plugin_candidate'])) : '';
+
+        if (uptime_monitor_hide_plugin_report_item($plugin_file, $plugin_name, $candidate)) {
+            $action_notice = 'Plugin hidden from the main report.';
+        } else {
+            $action_notice = 'Unable to hide that plugin because the plugin record was invalid.';
+            $action_notice_class = 'notice-error';
+        }
+    }
+
+    if (isset($_POST['unhide_plugin_report_item'])) {
+        check_admin_referer('uptime_monitor_unhide_plugin_report_item', 'uptime_monitor_unhide_plugin_report_item_nonce');
+
+        $plugin_file = isset($_POST['plugin_file']) ? uptime_monitor_normalize_plugin_file_key(wp_unslash($_POST['plugin_file'])) : '';
+        if (uptime_monitor_unhide_plugin_report_item($plugin_file)) {
+            $action_notice = 'Plugin restored to the main report.';
+        } else {
+            $action_notice = 'Unable to restore that plugin because it was not in the hidden list.';
+            $action_notice_class = 'notice-error';
+        }
+    }
 
     if (isset($_POST['refresh_plugin_report'])) {
         check_admin_referer('uptime_monitor_refresh_plugin_report', 'uptime_monitor_refresh_plugin_report_nonce');
@@ -737,9 +959,54 @@ function uptime_monitor_plugin_report_page() {
     }
 
     $report = uptime_monitor_build_off_directory_plugin_report($refresh_metadata);
+    $hidden_plugins = uptime_monitor_get_hidden_plugin_report_items();
+    $visible_items = [];
+    $hidden_report_items = [];
+    $active_hidden_keys = [];
+
+    if (!empty($report['items']) && is_array($report['items'])) {
+        foreach ($report['items'] as $item) {
+            $plugin_file = uptime_monitor_normalize_plugin_file_key($item['plugin_file'] ?? '');
+            if ($plugin_file !== '' && isset($hidden_plugins[$plugin_file])) {
+                $item['hidden_at'] = $hidden_plugins[$plugin_file]['hidden_at'];
+                $hidden_report_items[] = $item;
+                $active_hidden_keys[$plugin_file] = true;
+                continue;
+            }
+
+            $visible_items[] = $item;
+        }
+    }
+
+    $stale_hidden_items = [];
+    foreach ($hidden_plugins as $plugin_file => $hidden_item) {
+        if (!isset($active_hidden_keys[$plugin_file])) {
+            $stale_hidden_items[] = $hidden_item;
+        }
+    }
+
+    $visible_site_ids = [];
+    foreach ($visible_items as $item) {
+        if (empty($item['sites']) || !is_array($item['sites'])) {
+            continue;
+        }
+        foreach ($item['sites'] as $site_id => $site) {
+            $site_id = (int) $site_id;
+            if ($site_id > 0) {
+                $visible_site_ids[$site_id] = true;
+            }
+        }
+    }
+
+    $hidden_total = count($hidden_plugins);
+    $date_time_format = trim(get_option('date_format') . ' ' . get_option('time_format'));
 
     echo '<div class="wrap">';
     echo '<h1>Off-Directory Plugins</h1>';
+
+    if ($action_notice !== '') {
+        echo '<div class="notice ' . esc_attr($action_notice_class) . '"><p>' . esc_html($action_notice) . '</p></div>';
+    }
 
     if ($refresh_metadata) {
         $metadata_error_count = !empty($report['metadata_errors']) && is_array($report['metadata_errors']) ? count($report['metadata_errors']) : 0;
@@ -751,7 +1018,7 @@ function uptime_monitor_plugin_report_page() {
         echo '<div class="notice ' . esc_attr($notice_class) . '"><p>' . esc_html($notice_text) . '</p></div>';
     }
 
-    echo '<p class="uptime-monitor-plugin-report-intro">This report groups plugins found on MainWP child sites that could not be matched to the WordPress.org plugin directory. Versions and site mappings come from MainWP synced plugin inventories. Author and Plugin URI fields are filled from cached MainWP child-site metadata when available.</p>';
+    echo '<p class="uptime-monitor-plugin-report-intro">This report groups plugins found on MainWP child sites that are not currently available in the WordPress.org plugin directory. That includes custom plugins, premium plugins, and plugins that were later closed on WordPress.org. Versions and site mappings come from MainWP synced plugin inventories. Author and Plugin URI fields are filled from cached MainWP child-site metadata when available. Use Hide to suppress expected entries such as maintained premium plugins or hosting MU plugins.</p>';
 
     echo '<form method="post" action="' . esc_url(admin_url('admin.php?page=uptime-monitor-plugin-report')) . '" class="uptime-monitor-report-actions">';
     wp_nonce_field('uptime_monitor_refresh_plugin_report', 'uptime_monitor_refresh_plugin_report_nonce');
@@ -766,8 +1033,9 @@ function uptime_monitor_plugin_report_page() {
     }
 
     echo '<div class="uptime-monitor-report-stats">';
-    echo '<div class="uptime-monitor-report-stat"><span class="uptime-monitor-report-stat-value">' . esc_html(number_format_i18n($report['plugins_total'])) . '</span><span class="uptime-monitor-report-stat-label">Off-directory plugins</span></div>';
-    echo '<div class="uptime-monitor-report-stat"><span class="uptime-monitor-report-stat-value">' . esc_html(number_format_i18n($report['matching_sites'])) . '</span><span class="uptime-monitor-report-stat-label">Child sites with matches</span></div>';
+    echo '<div class="uptime-monitor-report-stat"><span class="uptime-monitor-report-stat-value">' . esc_html(number_format_i18n(count($visible_items))) . '</span><span class="uptime-monitor-report-stat-label">Visible plugins</span></div>';
+    echo '<div class="uptime-monitor-report-stat"><span class="uptime-monitor-report-stat-value">' . esc_html(number_format_i18n($hidden_total)) . '</span><span class="uptime-monitor-report-stat-label">Hidden by admin</span></div>';
+    echo '<div class="uptime-monitor-report-stat"><span class="uptime-monitor-report-stat-value">' . esc_html(number_format_i18n(count($visible_site_ids))) . '</span><span class="uptime-monitor-report-stat-label">Child sites with visible matches</span></div>';
     echo '<div class="uptime-monitor-report-stat"><span class="uptime-monitor-report-stat-value">' . esc_html(number_format_i18n($report['sites_total'])) . '</span><span class="uptime-monitor-report-stat-label">Total child sites checked</span></div>';
     echo '</div>';
 
@@ -791,95 +1059,189 @@ function uptime_monitor_plugin_report_page() {
         echo '<p class="uptime-monitor-plugin-report-warning">Some child sites did not return extended metadata. Existing cached values were used when available: ' . esc_html($failed_summary) . '.</p>';
     }
 
-    if (empty($report['items'])) {
-        echo '<p>No off-directory plugins were detected from the current MainWP plugin inventories.</p>';
-        echo '</div>';
-        return;
-    }
+    if (!empty($visible_items)) {
+        echo '<table class="widefat striped uptime-monitor-plugin-report-table">';
+        echo '<thead><tr><th>Plugin</th><th>Version(s)</th><th>Installed On</th><th>Author</th><th>Plugin URI</th><th>Action</th></tr></thead>';
+        echo '<tbody>';
 
-    echo '<table class="widefat striped uptime-monitor-plugin-report-table">';
-    echo '<thead><tr><th>Plugin</th><th>Version(s)</th><th>Installed On</th><th>Author</th><th>Plugin URI</th></tr></thead>';
-    echo '<tbody>';
+        foreach ($visible_items as $item) {
+            echo '<tr>';
 
-    foreach ($report['items'] as $item) {
-        echo '<tr>';
-
-        echo '<td>';
-        echo '<strong>' . esc_html($item['name']) . '</strong>';
-        echo '<div class="uptime-monitor-inline-note"><code>' . esc_html($item['plugin_file']) . '</code></div>';
-        if (!empty($item['candidate'])) {
-            echo '<div class="uptime-monitor-inline-note">Checked slug: <code>' . esc_html($item['candidate']) . '</code></div>';
-        }
-        if (!empty($item['has_mu'])) {
-            echo '<div><span class="uptime-monitor-report-badge">Must-use on at least one site</span></div>';
-        }
-        echo '</td>';
-
-        echo '<td><ul class="uptime-monitor-report-list">';
-        foreach ($item['versions'] as $version => $site_ids) {
-            echo '<li><span class="uptime-monitor-report-badge">' . esc_html($version) . '</span> <span class="uptime-monitor-inline-note">' . esc_html(number_format_i18n(count($site_ids))) . ' site' . (count($site_ids) === 1 ? '' : 's') . '</span></li>';
-        }
-        echo '</ul></td>';
-
-        echo '<td><ul class="uptime-monitor-report-list">';
-        foreach ($item['sites'] as $site) {
-            $site_label = $site['name'] !== '' ? $site['name'] : $site['url'];
-            echo '<li>';
-            if ($site['url'] !== '') {
-                echo '<a href="' . esc_url($site['url']) . '" target="_blank" rel="noopener noreferrer">' . esc_html($site_label) . '</a>';
-            } else {
-                echo esc_html($site_label);
+            echo '<td>';
+            echo '<strong>' . esc_html($item['name']) . '</strong>';
+            echo '<div class="uptime-monitor-inline-note"><code>' . esc_html($item['plugin_file']) . '</code></div>';
+            if (!empty($item['candidate'])) {
+                echo '<div class="uptime-monitor-inline-note">Checked slug: <code>' . esc_html($item['candidate']) . '</code></div>';
             }
-            echo ' <span class="uptime-monitor-inline-note">(' . esc_html($site['version']) . ')</span>';
-            if (!empty($site['suspended'])) {
-                echo ' <span class="uptime-monitor-report-badge is-warning">Suspended</span>';
-            }
-            if (!empty($site['sync_error'])) {
-                echo '<div class="uptime-monitor-inline-note">Sync warning: ' . esc_html($site['sync_error']) . '</div>';
-            }
-            echo '</li>';
-        }
-        echo '</ul></td>';
-
-        echo '<td>';
-        if (!empty($item['author_links'])) {
-            $author_index = 0;
-            foreach ($item['author_links'] as $author => $author_uri) {
-                if ($author_index > 0) {
-                    echo '<br>';
+            if (!empty($item['wporg_closed'])) {
+                $closed_note = 'Closed on WordPress.org';
+                if (!empty($item['wporg_closed_date'])) {
+                    $closed_note .= ' on ' . uptime_monitor_format_wporg_closed_date($item['wporg_closed_date']);
                 }
+                if (!empty($item['wporg_closed_reason'])) {
+                    $closed_note .= ' (' . $item['wporg_closed_reason'] . ')';
+                }
+                echo '<div class="uptime-monitor-inline-note"><span class="uptime-monitor-report-badge is-warning">Closed</span> ' . esc_html($closed_note);
+                if (!empty($item['wporg_closed_link'])) {
+                    echo ' <a href="' . esc_url($item['wporg_closed_link']) . '" target="_blank" rel="noopener noreferrer">View WordPress.org page</a>';
+                }
+                echo '</div>';
+            }
+            if (!empty($item['has_mu'])) {
+                echo '<div><span class="uptime-monitor-report-badge">Must-use on at least one site</span></div>';
+            }
+            echo '</td>';
 
-                if ($author_uri !== '') {
-                    echo '<a href="' . esc_url($author_uri) . '" target="_blank" rel="noopener noreferrer">' . esc_html($author) . '</a>';
+            echo '<td><ul class="uptime-monitor-report-list">';
+            foreach ($item['versions'] as $version => $site_ids) {
+                echo '<li><span class="uptime-monitor-report-badge">' . esc_html($version) . '</span> <span class="uptime-monitor-inline-note">' . esc_html(number_format_i18n(count($site_ids))) . ' site' . (count($site_ids) === 1 ? '' : 's') . '</span></li>';
+            }
+            echo '</ul></td>';
+
+            echo '<td><ul class="uptime-monitor-report-list">';
+            foreach ($item['sites'] as $site) {
+                $site_label = $site['name'] !== '' ? $site['name'] : $site['url'];
+                echo '<li>';
+                if ($site['url'] !== '') {
+                    echo '<a href="' . esc_url($site['url']) . '" target="_blank" rel="noopener noreferrer">' . esc_html($site_label) . '</a>';
                 } else {
-                    echo esc_html($author);
+                    echo esc_html($site_label);
                 }
-
-                $author_index++;
-            }
-        } else {
-            echo '<span class="uptime-monitor-inline-note">Not available</span>';
-        }
-        echo '</td>';
-
-        echo '<td>';
-        if (!empty($item['plugin_uris'])) {
-            foreach ($item['plugin_uris'] as $index => $plugin_uri) {
-                if ($index > 0) {
-                    echo '<br>';
+                echo ' <span class="uptime-monitor-inline-note">(' . esc_html($site['version']) . ')</span>';
+                if (!empty($site['suspended'])) {
+                    echo ' <span class="uptime-monitor-report-badge is-warning">Suspended</span>';
                 }
-                echo '<a href="' . esc_url($plugin_uri) . '" target="_blank" rel="noopener noreferrer">' . esc_html($plugin_uri) . '</a>';
+                if (!empty($site['sync_error'])) {
+                    echo '<div class="uptime-monitor-inline-note">Sync warning: ' . esc_html($site['sync_error']) . '</div>';
+                }
+                echo '</li>';
             }
-        } else {
-            echo '<span class="uptime-monitor-inline-note">Not available</span>';
-        }
-        echo '</td>';
+            echo '</ul></td>';
 
-        echo '</tr>';
+            echo '<td>';
+            if (!empty($item['author_links'])) {
+                $author_index = 0;
+                foreach ($item['author_links'] as $author => $author_uri) {
+                    if ($author_index > 0) {
+                        echo '<br>';
+                    }
+
+                    if ($author_uri !== '') {
+                        echo '<a href="' . esc_url($author_uri) . '" target="_blank" rel="noopener noreferrer">' . esc_html($author) . '</a>';
+                    } else {
+                        echo esc_html($author);
+                    }
+
+                    $author_index++;
+                }
+            } else {
+                echo '<span class="uptime-monitor-inline-note">Not available</span>';
+            }
+            echo '</td>';
+
+            echo '<td>';
+            if (!empty($item['plugin_uris'])) {
+                foreach ($item['plugin_uris'] as $index => $plugin_uri) {
+                    if ($index > 0) {
+                        echo '<br>';
+                    }
+                    echo '<a href="' . esc_url($plugin_uri) . '" target="_blank" rel="noopener noreferrer">' . esc_html($plugin_uri) . '</a>';
+                }
+            } else {
+                echo '<span class="uptime-monitor-inline-note">Not available</span>';
+            }
+            echo '</td>';
+
+            echo '<td class="uptime-monitor-report-action-cell">';
+            echo '<form method="post" action="' . esc_url(admin_url('admin.php?page=uptime-monitor-plugin-report')) . '" class="uptime-monitor-report-inline-form">';
+            wp_nonce_field('uptime_monitor_hide_plugin_report_item', 'uptime_monitor_hide_plugin_report_item_nonce');
+            echo '<input type="hidden" name="plugin_file" value="' . esc_attr($item['plugin_file']) . '">';
+            echo '<input type="hidden" name="plugin_name" value="' . esc_attr($item['name']) . '">';
+            echo '<input type="hidden" name="plugin_candidate" value="' . esc_attr($item['candidate']) . '">';
+            echo '<button type="submit" name="hide_plugin_report_item" class="button button-secondary">Hide</button>';
+            echo '<div class="uptime-monitor-inline-note">Keeps this entry out of the main table until restored.</div>';
+            echo '</form>';
+            echo '</td>';
+
+            echo '</tr>';
+        }
+
+        echo '</tbody>';
+        echo '</table>';
+    } elseif (empty($hidden_plugins)) {
+        echo '<p>No off-directory plugins were detected from the current MainWP plugin inventories.</p>';
+    } else {
+        echo '<p>All currently detected off-directory plugins are hidden from the main report. Review the hidden section below to restore any of them.</p>';
     }
 
-    echo '</tbody>';
-    echo '</table>';
+    if (!empty($hidden_report_items) || !empty($stale_hidden_items)) {
+        echo '<h2>Hidden Plugins</h2>';
+        echo '<p class="uptime-monitor-plugin-report-intro">Hidden plugins stay out of the main report until you restore them here.</p>';
+        echo '<table class="widefat striped uptime-monitor-plugin-report-table">';
+        echo '<thead><tr><th>Plugin</th><th>Status</th><th>Action</th></tr></thead>';
+        echo '<tbody>';
+
+        foreach ($hidden_report_items as $item) {
+            $hidden_at = isset($item['hidden_at']) ? absint($item['hidden_at']) : 0;
+            $hidden_at_text = $hidden_at > 0 ? date_i18n($date_time_format, $hidden_at) : 'Unknown';
+
+            echo '<tr>';
+            echo '<td>';
+            echo '<strong>' . esc_html($item['name']) . '</strong>';
+            echo '<div class="uptime-monitor-inline-note"><code>' . esc_html($item['plugin_file']) . '</code></div>';
+            if (!empty($item['candidate'])) {
+                echo '<div class="uptime-monitor-inline-note">Checked slug: <code>' . esc_html($item['candidate']) . '</code></div>';
+            }
+            echo '</td>';
+
+            echo '<td>';
+            echo '<div>' . esc_html(number_format_i18n(count($item['sites']))) . ' matching site' . (count($item['sites']) === 1 ? '' : 's') . ' currently hidden.</div>';
+            echo '<div class="uptime-monitor-inline-note">Hidden on ' . esc_html($hidden_at_text) . '.</div>';
+            echo '</td>';
+
+            echo '<td class="uptime-monitor-report-action-cell">';
+            echo '<form method="post" action="' . esc_url(admin_url('admin.php?page=uptime-monitor-plugin-report')) . '" class="uptime-monitor-report-inline-form">';
+            wp_nonce_field('uptime_monitor_unhide_plugin_report_item', 'uptime_monitor_unhide_plugin_report_item_nonce');
+            echo '<input type="hidden" name="plugin_file" value="' . esc_attr($item['plugin_file']) . '">';
+            echo '<button type="submit" name="unhide_plugin_report_item" class="button button-secondary">Unhide</button>';
+            echo '</form>';
+            echo '</td>';
+            echo '</tr>';
+        }
+
+        foreach ($stale_hidden_items as $hidden_item) {
+            $hidden_at = isset($hidden_item['hidden_at']) ? absint($hidden_item['hidden_at']) : 0;
+            $hidden_at_text = $hidden_at > 0 ? date_i18n($date_time_format, $hidden_at) : 'Unknown';
+            $plugin_label = !empty($hidden_item['name']) ? $hidden_item['name'] : $hidden_item['plugin_file'];
+
+            echo '<tr>';
+            echo '<td>';
+            echo '<strong>' . esc_html($plugin_label) . '</strong>';
+            echo '<div class="uptime-monitor-inline-note"><code>' . esc_html($hidden_item['plugin_file']) . '</code></div>';
+            if (!empty($hidden_item['candidate'])) {
+                echo '<div class="uptime-monitor-inline-note">Checked slug: <code>' . esc_html($hidden_item['candidate']) . '</code></div>';
+            }
+            echo '</td>';
+
+            echo '<td>';
+            echo '<div>Not currently detected in MainWP plugin inventories.</div>';
+            echo '<div class="uptime-monitor-inline-note">Hidden on ' . esc_html($hidden_at_text) . '.</div>';
+            echo '</td>';
+
+            echo '<td class="uptime-monitor-report-action-cell">';
+            echo '<form method="post" action="' . esc_url(admin_url('admin.php?page=uptime-monitor-plugin-report')) . '" class="uptime-monitor-report-inline-form">';
+            wp_nonce_field('uptime_monitor_unhide_plugin_report_item', 'uptime_monitor_unhide_plugin_report_item_nonce');
+            echo '<input type="hidden" name="plugin_file" value="' . esc_attr($hidden_item['plugin_file']) . '">';
+            echo '<button type="submit" name="unhide_plugin_report_item" class="button button-secondary">Unhide</button>';
+            echo '</form>';
+            echo '</td>';
+            echo '</tr>';
+        }
+
+        echo '</tbody>';
+        echo '</table>';
+    }
+
     echo '</div>';
 }
 
@@ -3001,6 +3363,15 @@ function uptime_monitor_enqueue_styles() {
         .uptime-monitor-plugin-report-table td {
             vertical-align: top;
         }
+        .uptime-monitor-report-action-cell {
+            width: 180px;
+        }
+        .uptime-monitor-report-inline-form {
+            margin: 0;
+            display: grid;
+            gap: 6px;
+            align-content: start;
+        }
         .uptime-monitor-report-list {
             margin: 0;
             padding-left: 18px;
@@ -3044,6 +3415,9 @@ function uptime_monitor_enqueue_styles() {
             }
             .uptime-monitor-report-actions {
                 align-items: flex-start;
+            }
+            .uptime-monitor-report-action-cell {
+                width: auto;
             }
         }
     </style>';
