@@ -3,7 +3,7 @@
 Plugin Name: Uptime Monitor
 Plugin URI: https://github.com/stronganchor/uptime-monitor/
 Description: A plugin to monitor URLs and report their HTTP status and display server stats.
-Version: 1.1.23
+Version: 1.1.24
 Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
 */
@@ -2657,16 +2657,24 @@ function uptime_monitor_extract_scalar_by_keys($value, $keys) {
     return '';
 }
 
+function uptime_monitor_get_whm_payload_data($response_data) {
+    if (!is_array($response_data) || !array_key_exists('data', $response_data)) {
+        return null;
+    }
+
+    return $response_data['data'];
+}
+
 function uptime_monitor_extract_whm_payload_scalar($response_data, $keys) {
     if (!is_array($response_data) || empty($keys)) {
         return '';
     }
 
-    if (!isset($response_data['data'])) {
+    $payload = uptime_monitor_get_whm_payload_data($response_data);
+    if ($payload === null) {
         return '';
     }
 
-    $payload = $response_data['data'];
     if (!is_array($payload)) {
         return is_scalar($payload) ? trim((string) $payload) : '';
     }
@@ -2747,19 +2755,21 @@ function uptime_monitor_collect_service_rows($value, &$rows) {
 function uptime_monitor_format_service_name($service_name) {
     $key = sanitize_key((string) $service_name);
     $labels = [
-        'cpsrvd'     => 'WHM / cPanel',
-        'httpd'      => 'Apache',
-        'apache'     => 'Apache',
-        'mysql'      => 'MySQL',
-        'mariadb'    => 'MariaDB',
-        'exim'       => 'Exim',
-        'dovecot'    => 'Dovecot',
-        'named'      => 'DNS',
-        'bind'       => 'DNS',
-        'pure_ftpd'  => 'FTP',
-        'pure-ftpd'  => 'FTP',
-        'proftpd'    => 'FTP',
-        'queueprocd' => 'Queue Processor',
+        'cpsrvd'         => 'WHM / cPanel',
+        'httpd'          => 'Apache',
+        'apache'         => 'Apache',
+        'mysql'          => 'MySQL',
+        'mariadb'        => 'MariaDB',
+        'exim'           => 'Exim',
+        'dovecot'        => 'Dovecot',
+        'named'          => 'DNS',
+        'bind'           => 'DNS',
+        'pure_ftpd'      => 'FTP',
+        'pure-ftpd'      => 'FTP',
+        'proftpd'        => 'FTP',
+        'queueprocd'     => 'Queue Processor',
+        'apache_php_fpm' => 'Apache PHP-FPM',
+        'cpanel_php_fpm' => 'cPanel PHP-FPM',
     ];
 
     if (isset($labels[$key])) {
@@ -2783,7 +2793,16 @@ function uptime_monitor_should_hide_service($service_name) {
     return strpos($service_key, 'mailman') !== false;
 }
 
-function uptime_monitor_get_whm_service_status($whm_user, $whm_api_token, $server_url) {
+function uptime_monitor_should_separate_service_from_overview($service_name) {
+    $service_key = sanitize_key((string) $service_name);
+    if ($service_key === '') {
+        return false;
+    }
+
+    return in_array($service_key, ['apache_php_fpm', 'cpanel_php_fpm'], true);
+}
+
+function uptime_monitor_get_whm_service_inventory($whm_user, $whm_api_token, $server_url) {
     $response = uptime_monitor_whm_api_request($whm_user, $whm_api_token, $server_url, 'json-api/servicestatus?api.version=1&full=1');
     if (empty($response['ok'])) {
         return 'Unable to retrieve service status from WHM: ' . ($response['error'] ?? 'Unknown error');
@@ -2900,6 +2919,14 @@ function uptime_monitor_get_whm_service_status($whm_user, $whm_api_token, $serve
         return 'Service status data was not included in the WHM response.';
     }
 
+    return $normalized;
+}
+
+function uptime_monitor_select_whm_overview_services($normalized) {
+    if (!is_array($normalized) || empty($normalized)) {
+        return [];
+    }
+
     $selected = [];
     $aliases = [
         'cpsrvd'  => ['cpsrvd', 'whostmgrd', 'cpaneld'],
@@ -2914,7 +2941,10 @@ function uptime_monitor_get_whm_service_status($whm_user, $whm_api_token, $serve
     foreach ($aliases as $alias_list) {
         foreach ($alias_list as $alias) {
             $alias_key = sanitize_key($alias);
-            if (isset($normalized[$alias_key])) {
+            if (
+                isset($normalized[$alias_key])
+                && !uptime_monitor_should_separate_service_from_overview($alias_key)
+            ) {
                 $selected[$alias_key] = $normalized[$alias_key];
                 break;
             }
@@ -2922,13 +2952,20 @@ function uptime_monitor_get_whm_service_status($whm_user, $whm_api_token, $serve
     }
 
     foreach ($normalized as $service_key => $service) {
+        if (uptime_monitor_should_separate_service_from_overview($service_key)) {
+            continue;
+        }
         if ($service['running'] === false || $service['monitored'] === true) {
             $selected[$service_key] = $service;
         }
     }
 
     if (empty($selected)) {
-        $selected = $normalized;
+        foreach ($normalized as $service_key => $service) {
+            if (!uptime_monitor_should_separate_service_from_overview($service_key)) {
+                $selected[$service_key] = $service;
+            }
+        }
     }
 
     uasort($selected, function($a, $b) {
@@ -2947,6 +2984,135 @@ function uptime_monitor_get_whm_service_status($whm_user, $whm_api_token, $serve
     });
 
     return array_slice(array_values($selected), 0, 8);
+}
+
+function uptime_monitor_get_whm_service_status($whm_user, $whm_api_token, $server_url) {
+    $inventory = uptime_monitor_get_whm_service_inventory($whm_user, $whm_api_token, $server_url);
+    if (!is_array($inventory)) {
+        return $inventory;
+    }
+
+    return uptime_monitor_select_whm_overview_services($inventory);
+}
+
+function uptime_monitor_get_whm_php_fpm_status($whm_user, $whm_api_token, $server_url, $service_inventory = []) {
+    $php_fpm = [
+        'level'               => 'unknown',
+        'summary'             => 'Unavailable',
+        'details'             => '',
+        'warning'             => '',
+        'domains_using_fpm'   => null,
+        'total_domains'       => null,
+        'domains_to_be_enabled' => null,
+        'default_accounts_to_fpm' => null,
+    ];
+
+    $service_inventory = is_array($service_inventory) ? $service_inventory : [];
+    $service_entries = [];
+    foreach (
+        [
+            'Apache' => 'apache_php_fpm',
+            'cPanel' => 'cpanel_php_fpm',
+        ] as $service_label => $service_key
+    ) {
+        if (!isset($service_inventory[$service_key]) || !is_array($service_inventory[$service_key])) {
+            continue;
+        }
+
+        $service = $service_inventory[$service_key];
+        $service_entries[] = $service;
+        if ($service['running'] === true) {
+            $php_fpm['details'] = trim($php_fpm['details'] . ($php_fpm['details'] === '' ? '' : ' | ') . $service_label . ' running');
+        } elseif ($service['running'] === false) {
+            $php_fpm['details'] = trim($php_fpm['details'] . ($php_fpm['details'] === '' ? '' : ' | ') . $service_label . ' down');
+        } else {
+            $php_fpm['details'] = trim($php_fpm['details'] . ($php_fpm['details'] === '' ? '' : ' | ') . $service_label . ' unknown');
+        }
+    }
+
+    $has_running_service = false;
+    $has_error_service = false;
+    foreach ($service_entries as $service) {
+        if (($service['running'] ?? null) === true) {
+            $has_running_service = true;
+        } elseif (($service['running'] ?? null) === false) {
+            $has_error_service = true;
+        }
+    }
+
+    if ($has_error_service) {
+        $php_fpm['level'] = 'error';
+    } elseif ($has_running_service) {
+        $php_fpm['level'] = 'ok';
+        $php_fpm['summary'] = 'Running';
+    }
+
+    $utilization_response = uptime_monitor_whm_api_request($whm_user, $whm_api_token, $server_url, 'json-api/get_fpm_count_and_utilization?api.version=1');
+    if (!empty($utilization_response['ok'])) {
+        $payload = uptime_monitor_get_whm_payload_data($utilization_response['data']);
+        if (is_array($payload)) {
+            $domains_using_fpm = uptime_monitor_parse_non_negative_number($payload['domains_using_fpm'] ?? null);
+            $total_domains = uptime_monitor_parse_non_negative_number($payload['total_domains'] ?? ($payload['domains_on_server'] ?? null));
+            $domains_to_be_enabled = uptime_monitor_parse_non_negative_number($payload['domains_to_be_enabled'] ?? ($payload['domains_on_server_but_not_using_fpm'] ?? null));
+            $show_warning = uptime_monitor_parse_optional_boolean($payload['show_warning'] ?? null);
+
+            if ($domains_using_fpm !== null) {
+                $php_fpm['domains_using_fpm'] = (int) round($domains_using_fpm);
+            }
+            if ($total_domains !== null) {
+                $php_fpm['total_domains'] = (int) round($total_domains);
+            }
+            if ($domains_to_be_enabled !== null) {
+                $php_fpm['domains_to_be_enabled'] = (int) round($domains_to_be_enabled);
+            }
+
+            if ($php_fpm['total_domains'] !== null && $php_fpm['total_domains'] > 0) {
+                $php_fpm['summary'] = number_format_i18n((int) $php_fpm['domains_using_fpm']) . ' / ' . number_format_i18n((int) $php_fpm['total_domains']) . ' domains';
+                if ($php_fpm['level'] === 'unknown') {
+                    $php_fpm['level'] = ((int) $php_fpm['domains_using_fpm'] > 0) ? 'ok' : 'warning';
+                }
+            }
+
+            if ($show_warning === true) {
+                $warning_note = 'Capacity warning';
+                if ($php_fpm['details'] === '') {
+                    $php_fpm['details'] = $warning_note;
+                } else {
+                    $php_fpm['details'] .= ' | ' . $warning_note;
+                }
+                $php_fpm['level'] = ($php_fpm['level'] === 'error') ? 'error' : 'warning';
+            }
+        }
+    } else {
+        $php_fpm['warning'] = 'Unable to retrieve PHP-FPM workload data from WHM: ' . ($utilization_response['error'] ?? 'Unknown error');
+    }
+
+    $default_response = uptime_monitor_whm_api_request($whm_user, $whm_api_token, $server_url, 'json-api/php_get_default_accounts_to_fpm?api.version=1');
+    if (!empty($default_response['ok'])) {
+        $payload = uptime_monitor_get_whm_payload_data($default_response['data']);
+        if (is_array($payload) && array_key_exists('default_accounts_to_fpm', $payload)) {
+            $default_accounts_to_fpm = uptime_monitor_parse_optional_boolean($payload['default_accounts_to_fpm']);
+            if ($default_accounts_to_fpm !== null) {
+                $php_fpm['default_accounts_to_fpm'] = $default_accounts_to_fpm;
+            }
+        }
+    } elseif ($php_fpm['warning'] === '') {
+        $php_fpm['warning'] = 'Unable to retrieve PHP-FPM default-account status from WHM: ' . ($default_response['error'] ?? 'Unknown error');
+    }
+
+    if ($php_fpm['details'] === '' && $php_fpm['domains_to_be_enabled'] !== null && $php_fpm['domains_to_be_enabled'] > 0) {
+        $php_fpm['details'] = '+' . number_format_i18n((int) $php_fpm['domains_to_be_enabled']) . ' can enable';
+    }
+
+    if ($php_fpm['details'] === '' && $php_fpm['default_accounts_to_fpm'] !== null) {
+        $php_fpm['details'] = 'New accounts: ' . ($php_fpm['default_accounts_to_fpm'] ? 'On' : 'Off');
+    }
+
+    if ($php_fpm['details'] === '' && $php_fpm['warning'] !== '') {
+        $php_fpm['details'] = $php_fpm['warning'];
+    }
+
+    return $php_fpm;
 }
 
 function uptime_monitor_get_whm_server_identity($whm_user, $whm_api_token, $server_url) {
@@ -3761,6 +3927,16 @@ function get_whm_server_stats() {
             'version'  => '',
             'warning'  => '',
         ],
+        'php_fpm'                  => [
+            'level'               => 'unknown',
+            'summary'             => 'Unavailable',
+            'details'             => '',
+            'warning'             => '',
+            'domains_using_fpm'   => null,
+            'total_domains'       => null,
+            'domains_to_be_enabled' => null,
+            'default_accounts_to_fpm' => null,
+        ],
         'services'                 => [],
         'services_warning'         => '',
         'total_accounts_used_mb'   => 0.0,
@@ -3774,12 +3950,18 @@ function get_whm_server_stats() {
 
     $stats['server_identity'] = uptime_monitor_get_whm_server_identity($whm_user, $whm_api_token, $server_url);
 
-    $services = uptime_monitor_get_whm_service_status($whm_user, $whm_api_token, $server_url);
-    if (is_array($services)) {
-        $stats['services'] = $services;
+    $service_inventory = uptime_monitor_get_whm_service_inventory($whm_user, $whm_api_token, $server_url);
+    if (is_array($service_inventory)) {
+        $stats['services'] = uptime_monitor_select_whm_overview_services($service_inventory);
     } else {
-        $stats['services_warning'] = (string) $services;
+        $stats['services_warning'] = (string) $service_inventory;
     }
+    $stats['php_fpm'] = uptime_monitor_get_whm_php_fpm_status(
+        $whm_user,
+        $whm_api_token,
+        $server_url,
+        is_array($service_inventory) ? $service_inventory : []
+    );
 
     $accounts = get_whm_account_list($whm_user, $whm_api_token, $server_url);
     if (!is_array($accounts)) {
@@ -4642,6 +4824,9 @@ function uptime_monitor_render_server_stats($stats) {
     $hostname = isset($identity['hostname']) ? trim((string) $identity['hostname']) : '';
     $version = isset($identity['version']) ? trim((string) $identity['version']) : '';
     $identity_warning = isset($identity['warning']) ? trim((string) $identity['warning']) : '';
+    $php_fpm = isset($stats['php_fpm']) && is_array($stats['php_fpm']) ? $stats['php_fpm'] : [];
+    $php_fpm_summary = isset($php_fpm['summary']) ? trim((string) $php_fpm['summary']) : 'Unavailable';
+    $php_fpm_details = isset($php_fpm['details']) ? trim((string) $php_fpm['details']) : '';
     $services = isset($stats['services']) && is_array($stats['services']) ? $stats['services'] : [];
     $services_warning = !empty($stats['services_warning']) ? trim((string) $stats['services_warning']) : '';
     $services_running = 0;
@@ -4758,7 +4943,7 @@ function uptime_monitor_render_server_stats($stats) {
 
     echo '</div>';
 
-    if ($hostname !== '' || $version !== '' || !empty($services) || $identity_warning !== '' || $services_warning !== '') {
+    if ($hostname !== '' || $version !== '' || !empty($services) || !empty($php_fpm) || $identity_warning !== '' || $services_warning !== '') {
         echo '<div class="uptime-monitor-overview-grid">';
 
         echo '<div class="uptime-monitor-overview-card">';
@@ -4769,6 +4954,14 @@ function uptime_monitor_render_server_stats($stats) {
         echo '<div class="uptime-monitor-overview-card">';
         echo '<span class="uptime-monitor-overview-card-label">WHM Version</span>';
         echo '<strong class="uptime-monitor-overview-card-value">' . esc_html($version !== '' ? $version : 'Unavailable') . '</strong>';
+        echo '</div>';
+
+        echo '<div class="uptime-monitor-overview-card">';
+        echo '<span class="uptime-monitor-overview-card-label">PHP-FPM</span>';
+        echo '<strong class="uptime-monitor-overview-card-value">' . esc_html($php_fpm_summary !== '' ? $php_fpm_summary : 'Unavailable') . '</strong>';
+        if ($php_fpm_details !== '') {
+            echo '<span class="uptime-monitor-overview-card-hint">' . esc_html($php_fpm_details) . '</span>';
+        }
         echo '</div>';
 
         echo '<div class="uptime-monitor-overview-card uptime-monitor-overview-card-services" tabindex="0">';
