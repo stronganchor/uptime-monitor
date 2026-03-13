@@ -3,7 +3,7 @@
 Plugin Name: Uptime Monitor
 Plugin URI: https://github.com/stronganchor/uptime-monitor/
 Description: A plugin to monitor URLs and report their HTTP status and display server stats.
-Version: 1.1.20
+Version: 1.1.21
 Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
 */
@@ -4605,6 +4605,35 @@ function uptime_monitor_render_server_stats($stats) {
         $trend_delta_text = $delta_prefix . number_format($trend_delta, 0) . '%';
     }
 
+    $identity = isset($stats['server_identity']) && is_array($stats['server_identity']) ? $stats['server_identity'] : [];
+    $hostname = isset($identity['hostname']) ? trim((string) $identity['hostname']) : '';
+    $version = isset($identity['version']) ? trim((string) $identity['version']) : '';
+    $identity_warning = isset($identity['warning']) ? trim((string) $identity['warning']) : '';
+    $services = isset($stats['services']) && is_array($stats['services']) ? $stats['services'] : [];
+    $services_warning = !empty($stats['services_warning']) ? trim((string) $stats['services_warning']) : '';
+    $services_running = 0;
+    $services_down = 0;
+    foreach ($services as $service) {
+        if (!is_array($service)) {
+            continue;
+        }
+        if (($service['running'] ?? null) === true) {
+            $services_running++;
+        } elseif (($service['running'] ?? null) === false) {
+            $services_down++;
+        }
+    }
+
+    $hostname_value_class = 'uptime-monitor-overview-card-value uptime-monitor-overview-card-value-hostname';
+    $hostname_length = strlen($hostname);
+    if ($hostname_length > 42) {
+        $hostname_value_class .= ' is-very-long';
+    } elseif ($hostname_length > 28) {
+        $hostname_value_class .= ' is-long';
+    }
+
+    echo '<h2>Server Overview</h2>';
+
     echo '<div class="uptime-monitor-load-strip" role="group" aria-label="Server load averages" data-load-refresh="1">';
     echo '<span class="uptime-monitor-load-label">Load Avg</span>';
     echo '<span class="uptime-monitor-load-status uptime-monitor-load-status-' . esc_attr($load_level) . '" data-load-status>';
@@ -4696,32 +4725,12 @@ function uptime_monitor_render_server_stats($stats) {
 
     echo '</div>';
 
-    $identity = isset($stats['server_identity']) && is_array($stats['server_identity']) ? $stats['server_identity'] : [];
-    $hostname = isset($identity['hostname']) ? trim((string) $identity['hostname']) : '';
-    $version = isset($identity['version']) ? trim((string) $identity['version']) : '';
-    $identity_warning = isset($identity['warning']) ? trim((string) $identity['warning']) : '';
-    $services = isset($stats['services']) && is_array($stats['services']) ? $stats['services'] : [];
-    $services_warning = !empty($stats['services_warning']) ? trim((string) $stats['services_warning']) : '';
-    $services_running = 0;
-    $services_down = 0;
-    foreach ($services as $service) {
-        if (!is_array($service)) {
-            continue;
-        }
-        if (($service['running'] ?? null) === true) {
-            $services_running++;
-        } elseif (($service['running'] ?? null) === false) {
-            $services_down++;
-        }
-    }
-
     if ($hostname !== '' || $version !== '' || !empty($services) || $identity_warning !== '' || $services_warning !== '') {
-        echo '<h2>Server Overview</h2>';
         echo '<div class="uptime-monitor-overview-grid">';
 
         echo '<div class="uptime-monitor-overview-card">';
         echo '<span class="uptime-monitor-overview-card-label">Hostname</span>';
-        echo '<strong class="uptime-monitor-overview-card-value">' . esc_html($hostname !== '' ? $hostname : 'Unavailable') . '</strong>';
+        echo '<strong class="' . esc_attr($hostname_value_class) . '">' . esc_html($hostname !== '' ? $hostname : 'Unavailable') . '</strong>';
         echo '</div>';
 
         echo '<div class="uptime-monitor-overview-card">';
@@ -4734,19 +4743,16 @@ function uptime_monitor_render_server_stats($stats) {
         echo '<strong class="uptime-monitor-overview-card-value">' . esc_html(number_format(count($stats['accounts'] ?? []))) . '</strong>';
         echo '</div>';
 
-        echo '<div class="uptime-monitor-overview-card">';
+        echo '<div class="uptime-monitor-overview-card uptime-monitor-overview-card-services" tabindex="0">';
         echo '<span class="uptime-monitor-overview-card-label">Services</span>';
         $services_value = !empty($services) ? ($services_running . ' up') : 'Unavailable';
         if ($services_down > 0) {
             $services_value .= ' / ' . $services_down . ' down';
         }
         echo '<strong class="uptime-monitor-overview-card-value">' . esc_html($services_value) . '</strong>';
-        echo '</div>';
-
-        echo '</div>';
-
+        echo '<span class="uptime-monitor-overview-card-hint">' . esc_html(!empty($services) ? 'Hover for service details' : 'Hover for service status') . '</span>';
+        echo '<div class="uptime-monitor-service-flyout">';
         if (!empty($services)) {
-            echo '<div class="uptime-monitor-service-grid">';
             foreach ($services as $service) {
                 if (!is_array($service)) {
                     continue;
@@ -4761,24 +4767,29 @@ function uptime_monitor_render_server_stats($stats) {
                     $service_status = 'Down';
                 }
 
-                echo '<div class="uptime-monitor-service-card">';
-                echo '<div class="uptime-monitor-service-card-header">';
-                echo '<span class="uptime-monitor-service-card-title">' . esc_html($service_name) . '</span>';
+                echo '<div class="uptime-monitor-service-flyout-row">';
+                echo '<div class="uptime-monitor-service-flyout-header">';
+                echo '<span class="uptime-monitor-service-flyout-title">' . esc_html($service_name) . '</span>';
                 echo uptime_monitor_render_diagnostic_badge($service_level, $service_status);
                 echo '</div>';
                 if (!empty($service['details'])) {
-                    echo '<div class="uptime-monitor-service-card-meta">' . esc_html((string) $service['details']) . '</div>';
+                    echo '<div class="uptime-monitor-service-flyout-meta">' . esc_html((string) $service['details']) . '</div>';
                 }
                 echo '</div>';
             }
-            echo '</div>';
+        } else {
+            echo '<div class="uptime-monitor-service-flyout-note">No service details were returned by WHM.</div>';
         }
+        if ($services_warning !== '') {
+            echo '<div class="uptime-monitor-service-flyout-note">' . esc_html($services_warning) . '</div>';
+        }
+        echo '</div>';
+        echo '</div>';
+
+        echo '</div>';
 
         if ($identity_warning !== '') {
             echo '<p class="uptime-monitor-disk-warning">' . esc_html($identity_warning) . '</p>';
-        }
-        if ($services_warning !== '') {
-            echo '<p class="uptime-monitor-disk-warning">' . esc_html($services_warning) . '</p>';
         }
     }
 
@@ -5772,20 +5783,22 @@ function uptime_monitor_enqueue_styles() {
             border-color: #d1d5db;
         }
         .uptime-monitor-overview-grid {
-            margin: 10px 0 14px;
+            margin: 8px 0 12px;
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-            gap: 10px;
+            grid-template-columns: repeat(auto-fit, minmax(165px, 1fr));
+            gap: 8px;
         }
         .uptime-monitor-overview-card {
-            padding: 12px 14px;
+            position: relative;
+            padding: 10px 12px;
             border: 1px solid #dcdcde;
-            border-radius: 12px;
+            border-radius: 10px;
             background: #ffffff;
+            overflow: hidden;
         }
         .uptime-monitor-overview-card-label {
             display: block;
-            font-size: 11px;
+            font-size: 10px;
             font-weight: 700;
             letter-spacing: 0.04em;
             text-transform: uppercase;
@@ -5793,41 +5806,99 @@ function uptime_monitor_enqueue_styles() {
         }
         .uptime-monitor-overview-card-value {
             display: block;
-            margin-top: 6px;
-            font-size: 18px;
-            line-height: 1.2;
+            margin-top: 4px;
+            font-size: 16px;
+            line-height: 1.15;
             color: #1d2327;
         }
-        .uptime-monitor-service-grid {
-            margin: 8px 0 16px;
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-            gap: 10px;
+        .uptime-monitor-overview-card-value-hostname {
+            font-size: clamp(14px, 1.35vw, 18px);
+            line-height: 1.08;
+            letter-spacing: -0.02em;
+            overflow-wrap: anywhere;
+            word-break: break-word;
         }
-        .uptime-monitor-service-card {
+        .uptime-monitor-overview-card-value-hostname.is-long {
+            font-size: clamp(13px, 1.15vw, 16px);
+        }
+        .uptime-monitor-overview-card-value-hostname.is-very-long {
+            font-size: clamp(12px, 1vw, 14px);
+        }
+        .uptime-monitor-overview-card-hint {
+            display: block;
+            margin-top: 4px;
+            font-size: 11px;
+            color: #646970;
+            line-height: 1.35;
+        }
+        .uptime-monitor-overview-card-services {
+            overflow: visible;
+            cursor: default;
+        }
+        .uptime-monitor-overview-card-services:focus {
+            outline: none;
+        }
+        .uptime-monitor-overview-card-services:focus-visible {
+            border-color: #1d4ed8;
+            box-shadow: 0 0 0 2px rgba(29, 78, 216, 0.18);
+        }
+        .uptime-monitor-service-flyout {
+            position: absolute;
+            top: calc(100% + 6px);
+            right: 0;
+            width: min(360px, calc(100vw - 48px));
+            max-height: 320px;
+            overflow: auto;
             padding: 10px 12px;
             border: 1px solid #dcdcde;
-            border-radius: 10px;
+            border-radius: 12px;
             background: #ffffff;
+            box-shadow: 0 14px 28px rgba(15, 23, 42, 0.16);
+            opacity: 0;
+            visibility: hidden;
+            transform: translateY(-6px);
+            transition: opacity 140ms ease, transform 140ms ease, visibility 140ms ease;
+            pointer-events: none;
+            z-index: 30;
         }
-        .uptime-monitor-service-card-header {
+        .uptime-monitor-overview-card-services:hover .uptime-monitor-service-flyout,
+        .uptime-monitor-overview-card-services:focus .uptime-monitor-service-flyout,
+        .uptime-monitor-overview-card-services:focus-within .uptime-monitor-service-flyout {
+            opacity: 1;
+            visibility: visible;
+            transform: translateY(0);
+            pointer-events: auto;
+        }
+        .uptime-monitor-service-flyout-row + .uptime-monitor-service-flyout-row {
+            margin-top: 8px;
+            padding-top: 8px;
+            border-top: 1px solid #eef2f5;
+        }
+        .uptime-monitor-service-flyout-header {
             display: flex;
             align-items: center;
             justify-content: space-between;
             gap: 8px;
         }
-        .uptime-monitor-service-card-title {
+        .uptime-monitor-service-flyout-title {
+            font-size: 13px;
             font-weight: 600;
             color: #1d2327;
+            line-height: 1.35;
         }
-        .uptime-monitor-service-card-meta,
+        .uptime-monitor-service-flyout-meta,
+        .uptime-monitor-service-flyout-note,
+        .uptime-monitor-diagnostics-meta {
+            margin-top: 4px;
+            font-size: 12px;
+            color: #50575e;
+            line-height: 1.45;
+        }
         .uptime-monitor-diagnostics-meta {
             margin-top: 6px;
             display: flex;
             flex-direction: column;
             gap: 3px;
-            font-size: 12px;
-            color: #50575e;
         }
         .uptime-monitor-diagnostics-table td {
             vertical-align: top;
@@ -5839,14 +5910,14 @@ function uptime_monitor_enqueue_styles() {
             margin: 8px 0 10px;
         }
         .uptime-monitor-load-strip {
-            margin: 10px 0 10px;
-            padding: 8px 10px;
+            margin: 0 0 10px;
+            padding: 6px 8px;
             border: 1px solid #dcdcde;
             border-radius: 10px;
             background: #ffffff;
             display: flex;
             align-items: center;
-            gap: 8px;
+            gap: 6px;
             flex-wrap: nowrap;
             overflow-x: auto;
         }
@@ -5898,12 +5969,12 @@ function uptime_monitor_enqueue_styles() {
         .uptime-monitor-load-metrics {
             display: flex;
             align-items: center;
-            gap: 6px;
+            gap: 5px;
             flex-wrap: nowrap;
         }
         .uptime-monitor-load-pill {
-            min-width: 100px;
-            padding: 4px 6px;
+            min-width: 96px;
+            padding: 3px 5px;
             border: 1px solid #dcdcde;
             border-radius: 7px;
             background: #f6f7f7;
@@ -5947,7 +6018,7 @@ function uptime_monitor_enqueue_styles() {
             display: inline-flex;
             align-items: center;
             gap: 6px;
-            padding: 3px 6px;
+            padding: 3px 5px;
             border: 1px solid #dcdcde;
             border-radius: 8px;
             background: #f8fafc;
@@ -6326,6 +6397,20 @@ function uptime_monitor_enqueue_styles() {
                 flex-wrap: wrap;
                 overflow-x: visible;
             }
+            .uptime-monitor-overview-grid {
+                grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            }
+            .uptime-monitor-overview-card-value-hostname,
+            .uptime-monitor-overview-card-value-hostname.is-long,
+            .uptime-monitor-overview-card-value-hostname.is-very-long {
+                font-size: 13px;
+            }
+            .uptime-monitor-service-flyout {
+                left: 0;
+                right: auto;
+                width: min(320px, calc(100vw - 40px));
+                max-height: 260px;
+            }
             .uptime-monitor-load-metrics {
                 flex-wrap: wrap;
             }
@@ -6355,10 +6440,6 @@ function uptime_monitor_enqueue_styles() {
             .uptime-monitor-report-status-cell,
             .uptime-monitor-report-notes-actions-cell {
                 width: auto;
-            }
-            .uptime-monitor-service-card-header {
-                align-items: flex-start;
-                flex-direction: column;
             }
             .uptime-monitor-diagnostics-table {
                 table-layout: auto;
