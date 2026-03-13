@@ -3,7 +3,7 @@
 Plugin Name: Uptime Monitor
 Plugin URI: https://github.com/stronganchor/uptime-monitor/
 Description: A plugin to monitor URLs and report their HTTP status and display server stats.
-Version: 1.1.22
+Version: 1.1.23
 Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
 */
@@ -2657,6 +2657,23 @@ function uptime_monitor_extract_scalar_by_keys($value, $keys) {
     return '';
 }
 
+function uptime_monitor_extract_whm_payload_scalar($response_data, $keys) {
+    if (!is_array($response_data) || empty($keys)) {
+        return '';
+    }
+
+    if (!isset($response_data['data'])) {
+        return '';
+    }
+
+    $payload = $response_data['data'];
+    if (!is_array($payload)) {
+        return is_scalar($payload) ? trim((string) $payload) : '';
+    }
+
+    return uptime_monitor_extract_scalar_by_keys($payload, $keys);
+}
+
 function uptime_monitor_parse_service_flag($value) {
     if (is_bool($value)) {
         return $value;
@@ -2941,14 +2958,14 @@ function uptime_monitor_get_whm_server_identity($whm_user, $whm_api_token, $serv
 
     $hostname_response = uptime_monitor_whm_api_request($whm_user, $whm_api_token, $server_url, 'json-api/gethostname?api.version=1');
     if (!empty($hostname_response['ok'])) {
-        $identity['hostname'] = uptime_monitor_extract_scalar_by_keys($hostname_response['data'], ['hostname', 'host']);
+        $identity['hostname'] = uptime_monitor_extract_whm_payload_scalar($hostname_response['data'], ['hostname', 'host']);
     } else {
         $identity['warning'] = uptime_monitor_append_warning_text($identity['warning'], 'Unable to retrieve hostname from WHM.');
     }
 
     $version_response = uptime_monitor_whm_api_request($whm_user, $whm_api_token, $server_url, 'json-api/version?api.version=1');
     if (!empty($version_response['ok'])) {
-        $identity['version'] = uptime_monitor_extract_scalar_by_keys($version_response['data'], ['version', 'short_version', 'current_version']);
+        $identity['version'] = uptime_monitor_extract_whm_payload_scalar($version_response['data'], ['version', 'short_version', 'current_version']);
     } else {
         $identity['warning'] = uptime_monitor_append_warning_text($identity['warning'], 'Unable to retrieve WHM version.');
     }
