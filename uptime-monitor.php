@@ -3,7 +3,7 @@
 Plugin Name: Uptime Monitor
 Plugin URI: https://github.com/stronganchor/uptime-monitor/
 Description: A plugin to monitor URLs and report their HTTP status and display server stats.
-Version: 1.1.26
+Version: 1.1.27
 Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
 */
@@ -3011,6 +3011,1184 @@ function uptime_monitor_get_whm_server_identity($whm_user, $whm_api_token, $serv
     return $identity;
 }
 
+function uptime_monitor_format_duration_brief($seconds) {
+    if (!is_numeric($seconds)) {
+        return '';
+    }
+
+    $seconds = max(0, (int) round((float) $seconds));
+    if ($seconds <= 0) {
+        return '0s';
+    }
+
+    $parts = [];
+    $units = [
+        DAY_IN_SECONDS    => 'd',
+        HOUR_IN_SECONDS   => 'h',
+        MINUTE_IN_SECONDS => 'm',
+        1                 => 's',
+    ];
+
+    foreach ($units as $unit_seconds => $label) {
+        if ($seconds < $unit_seconds) {
+            continue;
+        }
+
+        $value = (int) floor($seconds / $unit_seconds);
+        $parts[] = $value . $label;
+        $seconds -= $value * $unit_seconds;
+
+        if (count($parts) >= 2) {
+            break;
+        }
+    }
+
+    return implode(' ', $parts);
+}
+
+function uptime_monitor_format_disk_quota_summary($used_mb, $limit_mb = null) {
+    $used_mb = max(0.0, (float) $used_mb);
+    $summary = 'Quota: ' . uptime_monitor_format_mb($used_mb);
+
+    if ($limit_mb !== null && is_numeric($limit_mb) && (float) $limit_mb > 0.0) {
+        $limit_mb = (float) $limit_mb;
+        $used_pct = min(100.0, ($used_mb / $limit_mb) * 100.0);
+        $summary .= ' / ' . uptime_monitor_format_mb($limit_mb) . ' (' . number_format($used_pct, 0) . '%)';
+    } else {
+        $summary .= ' / Unlimited';
+    }
+
+    return $summary;
+}
+
+function uptime_monitor_get_account_package_name($account) {
+    if (!is_array($account)) {
+        return '';
+    }
+
+    foreach (['package', 'plan', 'pkg', 'planname'] as $key) {
+        if (!isset($account[$key]) || !is_scalar($account[$key])) {
+            continue;
+        }
+
+        $value = trim((string) $account[$key]);
+        if ($value !== '') {
+            return $value;
+        }
+    }
+
+    return '';
+}
+
+function uptime_monitor_build_diagnostics_account_map($accounts) {
+    $map = [];
+    if (!is_array($accounts)) {
+        return $map;
+    }
+
+    foreach ($accounts as $account) {
+        if (!is_array($account)) {
+            continue;
+        }
+
+        $username = isset($account['username']) ? (string) $account['username'] : '';
+        $domain = isset($account['domain']) ? (string) $account['domain'] : '';
+        $keys = uptime_monitor_get_account_lookup_keys($username, $domain);
+        foreach ($keys as $key) {
+            if (!isset($map[$key])) {
+                $map[$key] = $account;
+            }
+        }
+    }
+
+    return $map;
+}
+
+function uptime_monitor_resolve_account_from_bundle($bundle, $account) {
+    if (!is_array($account) || empty($account)) {
+        return $account;
+    }
+
+    $map = isset($bundle['account_map']) && is_array($bundle['account_map']) ? $bundle['account_map'] : [];
+    if (empty($map)) {
+        return $account;
+    }
+
+    $keys = uptime_monitor_get_account_lookup_keys($account['username'] ?? '', $account['domain'] ?? '');
+    foreach ($keys as $key) {
+        if (isset($map[$key]) && is_array($map[$key])) {
+            return $map[$key];
+        }
+    }
+
+    return $account;
+}
+
+function uptime_monitor_get_diagnostics_server_bundle_cache_key() {
+    return 'uptime_monitor_diag_server_bundle_v1';
+}
+
+function uptime_monitor_get_diagnostics_db_inventory_cache_key() {
+    return 'uptime_monitor_diag_db_inventory_v1';
+}
+
+function uptime_monitor_get_diagnostics_job_key($job_id) {
+    return 'uptime_monitor_diag_job_' . md5((string) $job_id);
+}
+
+function uptime_monitor_get_diagnostics_batch_size($force_refresh = false) {
+    return $force_refresh ? 4 : 8;
+}
+
+function uptime_monitor_get_diagnostics_db_batch_size($force_refresh = false) {
+    return $force_refresh ? 2 : 4;
+}
+
+function uptime_monitor_parse_boolean_int($value) {
+    $parsed = uptime_monitor_parse_optional_boolean($value);
+    return ($parsed === null) ? null : $parsed;
+}
+
+function uptime_monitor_get_whm_ssl_vhost_inventory($whm_user, $whm_api_token, $server_url) {
+    $response = uptime_monitor_whm_api_request($whm_user, $whm_api_token, $server_url, 'json-api/fetch_ssl_vhosts?api.version=1');
+    if (empty($response['ok'])) {
+        return 'Unable to retrieve WHM SSL inventory: ' . ($response['error'] ?? 'Unknown error');
+    }
+
+    $payload = uptime_monitor_get_whm_payload_data($response['data']);
+    $rows = [];
+    if (is_array($payload) && !empty($payload['vhosts']) && is_array($payload['vhosts'])) {
+        $rows = $payload['vhosts'];
+    }
+
+    if (empty($rows)) {
+        return 'WHM SSL inventory data was not included in the response.';
+    }
+
+    $entries = [];
+    foreach ($rows as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+
+        $domains = [];
+        foreach (['servername', 'user'] as $scalar_key) {
+            if (isset($row[$scalar_key]) && is_scalar($row[$scalar_key]) && $scalar_key === 'servername') {
+                $domains = uptime_monitor_collect_unique_text($domains, uptime_monitor_normalize_lookup_key($row[$scalar_key]));
+            }
+        }
+
+        if (!empty($row['domains']) && is_array($row['domains'])) {
+            foreach ($row['domains'] as $domain) {
+                $domains = uptime_monitor_collect_unique_text($domains, uptime_monitor_normalize_lookup_key($domain));
+            }
+        }
+
+        $crt = isset($row['crt']) && is_array($row['crt']) ? $row['crt'] : [];
+        $cert_domains = [];
+        if (!empty($crt['domains']) && is_array($crt['domains'])) {
+            foreach ($crt['domains'] as $domain) {
+                $normalized = uptime_monitor_normalize_lookup_key($domain);
+                if ($normalized !== '') {
+                    $cert_domains = uptime_monitor_collect_unique_text($cert_domains, $normalized);
+                }
+            }
+        }
+
+        $common_name = '';
+        if (!empty($crt['subject.commonName']['commonName']) && is_scalar($crt['subject.commonName']['commonName'])) {
+            $common_name = trim((string) $crt['subject.commonName']['commonName']);
+        }
+        if ($common_name !== '') {
+            $normalized_common_name = uptime_monitor_normalize_lookup_key($common_name);
+            if ($normalized_common_name !== '') {
+                $cert_domains = uptime_monitor_collect_unique_text($cert_domains, $normalized_common_name);
+            }
+        }
+
+        $entry = [
+            'user'            => isset($row['user']) && is_scalar($row['user']) ? trim((string) $row['user']) : '',
+            'servername'      => isset($row['servername']) && is_scalar($row['servername']) ? trim((string) $row['servername']) : '',
+            'type'            => isset($row['type']) && is_scalar($row['type']) ? trim((string) $row['type']) : '',
+            'domains'         => array_values(array_filter(array_unique($domains), 'strlen')),
+            'cert_domains'    => array_values(array_filter(array_unique($cert_domains), 'strlen')),
+            'ip'              => uptime_monitor_normalize_ip_address($row['ip'] ?? ''),
+            'docroot'         => isset($row['docroot']) && is_scalar($row['docroot']) ? trim((string) $row['docroot']) : '',
+            'issuer'          => isset($crt['issuer_text']) && is_scalar($crt['issuer_text']) ? trim((string) $crt['issuer_text']) : '',
+            'common_name'     => $common_name,
+            'not_before'      => isset($crt['not_before']) && is_numeric($crt['not_before']) ? (int) $crt['not_before'] : null,
+            'not_after'       => isset($crt['not_after']) && is_numeric($crt['not_after']) ? (int) $crt['not_after'] : null,
+            'validation_type' => isset($crt['validation_type']) && is_scalar($crt['validation_type']) ? trim((string) $crt['validation_type']) : '',
+            'is_self_signed'  => uptime_monitor_parse_boolean_int($crt['is_self_signed'] ?? null),
+        ];
+
+        if ($entry['user'] === '' && empty($entry['domains'])) {
+            continue;
+        }
+
+        $entries[] = $entry;
+    }
+
+    return [
+        'entries' => $entries,
+        'warning' => '',
+    ];
+}
+
+function uptime_monitor_find_whm_ssl_entry_for_host($site_host, $ssl_inventory) {
+    $site_host = uptime_monitor_normalize_lookup_key($site_host);
+    if ($site_host === '' || !is_array($ssl_inventory) || empty($ssl_inventory['entries']) || !is_array($ssl_inventory['entries'])) {
+        return [];
+    }
+
+    $best_match = [];
+    $best_score = -1;
+    $site_aliases = [$site_host];
+    if (strpos($site_host, 'www.') !== 0) {
+        $site_aliases[] = 'www.' . $site_host;
+    }
+
+    foreach ($ssl_inventory['entries'] as $entry) {
+        if (!is_array($entry)) {
+            continue;
+        }
+
+        $names = [];
+        foreach (array_merge($entry['domains'] ?? [], $entry['cert_domains'] ?? []) as $name) {
+            $normalized_name = uptime_monitor_normalize_certificate_lookup_key($name);
+            if ($normalized_name !== '') {
+                $names[] = $normalized_name;
+            }
+        }
+        $names = array_values(array_unique(array_filter($names, 'strlen')));
+
+        $score = -1;
+        foreach ($names as $name) {
+            if ($name === $site_host) {
+                $score = max($score, 1000);
+                continue;
+            }
+
+            foreach ($site_aliases as $alias) {
+                if ($name === $alias) {
+                    $score = max($score, 975);
+                } elseif (uptime_monitor_domain_ends_with($alias, $name) || uptime_monitor_domain_ends_with($name, $alias)) {
+                    $score = max($score, 820);
+                }
+            }
+        }
+
+        if ($score < 0) {
+            continue;
+        }
+
+        if (($entry['type'] ?? '') === 'main') {
+            $score += 5;
+        }
+        if (($entry['servername'] ?? '') === $site_host) {
+            $score += 2;
+        }
+
+        if ($score > $best_score) {
+            $best_score = $score;
+            $best_match = $entry;
+        }
+    }
+
+    return $best_match;
+}
+
+function uptime_monitor_get_site_certificate_details_from_whm_entry($host, $entry) {
+    $details = [
+        'level'          => 'unknown',
+        'summary'        => 'WHM inventory unavailable',
+        'issuer'         => '',
+        'common_name'    => '',
+        'valid_to'       => null,
+        'days_remaining' => null,
+        'host_matches'   => null,
+        'names'          => [],
+        'source'         => 'whm',
+    ];
+
+    if (!is_array($entry) || empty($entry)) {
+        return $details;
+    }
+
+    $host = uptime_monitor_normalize_lookup_key($host);
+    $names = [];
+    foreach (array_merge($entry['domains'] ?? [], $entry['cert_domains'] ?? []) as $name) {
+        $normalized_name = uptime_monitor_normalize_lookup_key($name);
+        if ($normalized_name !== '') {
+            $names[] = $normalized_name;
+        }
+    }
+    if (!empty($entry['common_name'])) {
+        $normalized_common_name = uptime_monitor_normalize_lookup_key($entry['common_name']);
+        if ($normalized_common_name !== '') {
+            $names[] = $normalized_common_name;
+        }
+    }
+    $names = array_values(array_unique(array_filter($names, 'strlen')));
+
+    $details['issuer'] = isset($entry['issuer']) ? trim((string) $entry['issuer']) : '';
+    $details['common_name'] = isset($entry['common_name']) ? trim((string) $entry['common_name']) : '';
+    $details['valid_to'] = isset($entry['not_after']) && is_numeric($entry['not_after']) ? (int) $entry['not_after'] : null;
+    $details['names'] = $names;
+
+    if (!empty($names) && $host !== '') {
+        $details['host_matches'] = false;
+        foreach ($names as $pattern) {
+            if (uptime_monitor_certificate_name_matches_host($host, $pattern)) {
+                $details['host_matches'] = true;
+                break;
+            }
+        }
+    }
+
+    if ($details['valid_to'] !== null) {
+        $days_remaining = (int) floor(($details['valid_to'] - time()) / DAY_IN_SECONDS);
+        $details['days_remaining'] = $days_remaining;
+
+        if ($days_remaining < 0) {
+            $details['level'] = 'error';
+            $details['summary'] = 'Expired ' . abs($days_remaining) . 'd ago';
+        } elseif ($days_remaining <= 30) {
+            $details['level'] = 'warning';
+            $details['summary'] = 'Expires in ' . $days_remaining . 'd';
+        } else {
+            $details['level'] = 'ok';
+            $details['summary'] = $days_remaining . 'd left';
+        }
+    } else {
+        $details['summary'] = 'Certificate found';
+    }
+
+    if ($details['host_matches'] === false) {
+        $details['level'] = uptime_monitor_merge_site_diagnostic_level($details['level'], 'warning');
+        $details['summary'] .= ' | host mismatch';
+    }
+
+    if (!empty($entry['is_self_signed'])) {
+        $details['level'] = uptime_monitor_merge_site_diagnostic_level($details['level'], 'warning');
+        $details['summary'] .= ' | self-signed';
+    }
+
+    return $details;
+}
+
+function uptime_monitor_format_php_version_label($version) {
+    $version = trim((string) $version);
+    if ($version === '') {
+        return '';
+    }
+
+    if ($version === 'inherit') {
+        return 'Inherited';
+    }
+
+    if (preg_match('/^ea-php([0-9])([0-9]{1,2})$/', $version, $matches)) {
+        return 'PHP ' . $matches[1] . '.' . $matches[2];
+    }
+
+    return $version;
+}
+
+function uptime_monitor_get_whm_php_vhost_versions($whm_user, $whm_api_token, $server_url) {
+    $response = uptime_monitor_whm_api_request($whm_user, $whm_api_token, $server_url, 'json-api/php_get_vhost_versions?api.version=1');
+    if (empty($response['ok'])) {
+        return 'Unable to retrieve WHM PHP versions: ' . ($response['error'] ?? 'Unknown error');
+    }
+
+    $payload = uptime_monitor_get_whm_payload_data($response['data']);
+    $rows = [];
+    if (is_array($payload) && !empty($payload['versions']) && is_array($payload['versions'])) {
+        $rows = $payload['versions'];
+    }
+
+    if (empty($rows)) {
+        return 'WHM PHP version data was not included in the response.';
+    }
+
+    $by_user = [];
+    $by_vhost = [];
+
+    foreach ($rows as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+
+        $user = isset($row['account']) && is_scalar($row['account']) ? trim((string) $row['account']) : '';
+        $vhost = isset($row['vhost']) && is_scalar($row['vhost']) ? uptime_monitor_normalize_lookup_key($row['vhost']) : '';
+        $version = isset($row['version']) && is_scalar($row['version']) ? trim((string) $row['version']) : '';
+        if ($user === '' && $vhost === '') {
+            continue;
+        }
+
+        $entry = [
+            'account'      => $user,
+            'vhost'        => $vhost,
+            'version'      => $version,
+            'version_text' => uptime_monitor_format_php_version_label($version),
+            'php_fpm'      => uptime_monitor_parse_boolean_int($row['php_fpm'] ?? null),
+            'main_domain'  => uptime_monitor_parse_boolean_int($row['main_domain'] ?? null),
+            'suspended'    => uptime_monitor_parse_boolean_int($row['is_suspended'] ?? null),
+            'documentroot' => isset($row['documentroot']) && is_scalar($row['documentroot']) ? trim((string) $row['documentroot']) : '',
+        ];
+
+        if ($user !== '') {
+            if (!isset($by_user[$user])) {
+                $by_user[$user] = [
+                    'entries'   => [],
+                    'versions'  => [],
+                    'php_fpm'   => [],
+                    'suspended' => false,
+                ];
+            }
+            $by_user[$user]['entries'][] = $entry;
+            if ($entry['version_text'] !== '') {
+                $by_user[$user]['versions'][$entry['version_text']] = true;
+            }
+            if ($entry['php_fpm'] !== null) {
+                $by_user[$user]['php_fpm'][(int) $entry['php_fpm']] = true;
+            }
+            $by_user[$user]['suspended'] = $by_user[$user]['suspended'] || !empty($entry['suspended']);
+        }
+
+        if ($vhost !== '') {
+            $by_vhost[$vhost] = $entry;
+        }
+    }
+
+    foreach ($by_user as $user => $summary) {
+        $versions = array_keys($summary['versions']);
+        natcasesort($versions);
+        $versions = array_values($versions);
+
+        $version_summary = 'Unknown';
+        if (count($versions) === 1) {
+            $version_summary = $versions[0];
+        } elseif (count($versions) > 1) {
+            $version_summary = $versions[0] . ' +' . (count($versions) - 1) . ' more';
+        }
+
+        $php_fpm_summary = 'Unknown';
+        if (isset($summary['php_fpm'][1]) && !isset($summary['php_fpm'][0])) {
+            $php_fpm_summary = 'On';
+        } elseif (!isset($summary['php_fpm'][1]) && isset($summary['php_fpm'][0])) {
+            $php_fpm_summary = 'Off';
+        } elseif (!empty($summary['php_fpm'])) {
+            $php_fpm_summary = 'Mixed';
+        }
+
+        $by_user[$user]['versions'] = $versions;
+        $by_user[$user]['version_summary'] = $version_summary;
+        $by_user[$user]['php_fpm_summary'] = $php_fpm_summary;
+    }
+
+    return [
+        'by_user'  => $by_user,
+        'by_vhost' => $by_vhost,
+        'warning'  => '',
+    ];
+}
+
+function uptime_monitor_get_php_details_for_site($site_host, $account, $php_inventory) {
+    $details = [
+        'summary'        => '',
+        'version'        => '',
+        'php_fpm'        => null,
+        'match_source'   => '',
+        'match_evidence' => '',
+    ];
+
+    $site_host = uptime_monitor_normalize_lookup_key($site_host);
+    if ($site_host === '' || !is_array($php_inventory)) {
+        return $details;
+    }
+
+    $by_vhost = isset($php_inventory['by_vhost']) && is_array($php_inventory['by_vhost']) ? $php_inventory['by_vhost'] : [];
+    $by_user = isset($php_inventory['by_user']) && is_array($php_inventory['by_user']) ? $php_inventory['by_user'] : [];
+
+    if (isset($by_vhost[$site_host]) && is_array($by_vhost[$site_host])) {
+        $entry = $by_vhost[$site_host];
+        $details['version'] = (string) ($entry['version_text'] ?? '');
+        $details['php_fpm'] = $entry['php_fpm'] ?? null;
+        $details['match_source'] = 'vhost';
+        $details['match_evidence'] = $site_host;
+    }
+
+    if ($details['version'] === '' && !empty($account['username'])) {
+        $user = (string) $account['username'];
+        if (isset($by_user[$user]) && is_array($by_user[$user])) {
+            $details['version'] = (string) ($by_user[$user]['version_summary'] ?? '');
+            $php_fpm_summary = isset($by_user[$user]['php_fpm_summary']) ? (string) $by_user[$user]['php_fpm_summary'] : '';
+            if ($php_fpm_summary === 'On') {
+                $details['php_fpm'] = true;
+            } elseif ($php_fpm_summary === 'Off') {
+                $details['php_fpm'] = false;
+            }
+            $details['match_source'] = 'account';
+            $details['match_evidence'] = $user;
+        }
+    }
+
+    if ($details['version'] !== '') {
+        $details['summary'] = $details['version'];
+        if ($details['php_fpm'] === true) {
+            $details['summary'] .= ' | FPM on';
+        } elseif ($details['php_fpm'] === false) {
+            $details['summary'] .= ' | FPM off';
+        }
+    }
+
+    return $details;
+}
+
+function uptime_monitor_get_whm_email_track_activity($whm_user, $whm_api_token, $server_url) {
+    $query = 'json-api/emailtrack_search?api.version=1&failure=1&defer=1&success=0&inprogress=0&max_results_by_type=100';
+    $response = uptime_monitor_whm_api_request($whm_user, $whm_api_token, $server_url, $query);
+    if (empty($response['ok'])) {
+        return 'Unable to retrieve WHM mail delivery activity: ' . ($response['error'] ?? 'Unknown error');
+    }
+
+    $payload = uptime_monitor_get_whm_payload_data($response['data']);
+    $records = [];
+    if (is_array($payload) && !empty($payload['records']) && is_array($payload['records'])) {
+        $records = $payload['records'];
+    }
+
+    $by_user = [];
+    $by_domain = [];
+    $total_failures = 0;
+    $total_defers = 0;
+
+    foreach ($records as $record) {
+        if (!is_array($record)) {
+            continue;
+        }
+
+        $type = isset($record['type']) && is_scalar($record['type']) ? sanitize_key($record['type']) : '';
+        if (!in_array($type, ['failure', 'defer'], true)) {
+            continue;
+        }
+
+        $group = [
+            'failure_count' => ($type === 'failure') ? 1 : 0,
+            'defer_count'   => ($type === 'defer') ? 1 : 0,
+            'last_time'     => isset($record['actionunixtime']) && is_numeric($record['actionunixtime']) ? (int) $record['actionunixtime'] : 0,
+            'messages'      => [],
+        ];
+
+        $message = isset($record['message']) && is_scalar($record['message']) ? trim((string) $record['message']) : '';
+        if ($message !== '') {
+            $group['messages'][] = $message;
+        }
+
+        $user = isset($record['user']) && is_scalar($record['user']) ? uptime_monitor_normalize_lookup_key($record['user']) : '';
+        $domain_candidates = [
+            uptime_monitor_normalize_lookup_key($record['domain'] ?? ''),
+            uptime_monitor_normalize_lookup_key($record['deliverydomain'] ?? ''),
+        ];
+
+        if ($type === 'failure') {
+            $total_failures++;
+        } else {
+            $total_defers++;
+        }
+
+        if ($user !== '') {
+            if (!isset($by_user[$user])) {
+                $by_user[$user] = [
+                    'failure_count' => 0,
+                    'defer_count'   => 0,
+                    'last_time'     => 0,
+                    'messages'      => [],
+                ];
+            }
+            $by_user[$user]['failure_count'] += $group['failure_count'];
+            $by_user[$user]['defer_count'] += $group['defer_count'];
+            $by_user[$user]['last_time'] = max($by_user[$user]['last_time'], $group['last_time']);
+            foreach ($group['messages'] as $group_message) {
+                $by_user[$user]['messages'] = uptime_monitor_collect_unique_text($by_user[$user]['messages'], $group_message);
+            }
+        }
+
+        foreach ($domain_candidates as $domain_candidate) {
+            if ($domain_candidate === '') {
+                continue;
+            }
+            if (!isset($by_domain[$domain_candidate])) {
+                $by_domain[$domain_candidate] = [
+                    'failure_count' => 0,
+                    'defer_count'   => 0,
+                    'last_time'     => 0,
+                    'messages'      => [],
+                ];
+            }
+            $by_domain[$domain_candidate]['failure_count'] += $group['failure_count'];
+            $by_domain[$domain_candidate]['defer_count'] += $group['defer_count'];
+            $by_domain[$domain_candidate]['last_time'] = max($by_domain[$domain_candidate]['last_time'], $group['last_time']);
+            foreach ($group['messages'] as $group_message) {
+                $by_domain[$domain_candidate]['messages'] = uptime_monitor_collect_unique_text($by_domain[$domain_candidate]['messages'], $group_message);
+            }
+        }
+    }
+
+    return [
+        'by_user'        => $by_user,
+        'by_domain'      => $by_domain,
+        'total_failures' => $total_failures,
+        'total_defers'   => $total_defers,
+        'warning'        => '',
+        'available'      => true,
+    ];
+}
+
+function uptime_monitor_get_email_activity_for_site($site_host, $account, $email_activity) {
+    $empty = [
+        'failure_count' => 0,
+        'defer_count'   => 0,
+        'last_time'     => 0,
+        'messages'      => [],
+        'match_source'  => '',
+        'match_key'     => '',
+        'available'     => false,
+        'warning'       => '',
+    ];
+
+    if (!is_array($email_activity)) {
+        $empty['warning'] = is_string($email_activity) ? $email_activity : '';
+        return $empty;
+    }
+
+    $empty['available'] = !empty($email_activity['available']);
+    $empty['warning'] = isset($email_activity['warning']) ? (string) $email_activity['warning'] : '';
+
+    $domain_candidates = [];
+    $site_host = uptime_monitor_normalize_lookup_key($site_host);
+    if ($site_host !== '') {
+        $parts = explode('.', $site_host);
+        while (count($parts) >= 2) {
+            $domain_candidates[] = implode('.', $parts);
+            array_shift($parts);
+        }
+    }
+    $account_domain = uptime_monitor_normalize_lookup_key($account['domain'] ?? '');
+    if ($account_domain !== '' && !in_array($account_domain, $domain_candidates, true)) {
+        array_unshift($domain_candidates, $account_domain);
+    }
+
+    $by_domain = isset($email_activity['by_domain']) && is_array($email_activity['by_domain']) ? $email_activity['by_domain'] : [];
+    foreach ($domain_candidates as $domain_candidate) {
+        if (isset($by_domain[$domain_candidate]) && is_array($by_domain[$domain_candidate])) {
+            $match = $by_domain[$domain_candidate];
+            $match['match_source'] = 'domain';
+            $match['match_key'] = $domain_candidate;
+            $match['available'] = true;
+            $match['warning'] = $empty['warning'];
+            return $match;
+        }
+    }
+
+    $user = uptime_monitor_normalize_lookup_key($account['username'] ?? '');
+    $by_user = isset($email_activity['by_user']) && is_array($email_activity['by_user']) ? $email_activity['by_user'] : [];
+    if ($user !== '' && isset($by_user[$user]) && is_array($by_user[$user])) {
+        $match = $by_user[$user];
+        $match['match_source'] = 'account';
+        $match['match_key'] = $user;
+        $match['available'] = true;
+        $match['warning'] = $empty['warning'];
+        return $match;
+    }
+
+    return $empty;
+}
+
+function uptime_monitor_merge_mail_diagnostics($dns_probe, $email_activity) {
+    $mail = is_array($dns_probe) ? $dns_probe : uptime_monitor_probe_mail_dns('');
+    $mail['delivery'] = $email_activity;
+    $mail['source'] = !empty($email_activity['available']) ? 'whm_track_email' : 'dns_only';
+
+    $delivery_summary = '';
+    if (!empty($email_activity['available'])) {
+        if (!empty($email_activity['failure_count'])) {
+            $delivery_summary = number_format_i18n((int) $email_activity['failure_count']) . ' recent failure' . ((int) $email_activity['failure_count'] === 1 ? '' : 's');
+            $mail['level'] = 'error';
+        } elseif (!empty($email_activity['defer_count'])) {
+            $delivery_summary = number_format_i18n((int) $email_activity['defer_count']) . ' recent defer' . ((int) $email_activity['defer_count'] === 1 ? '' : 's');
+            $mail['level'] = uptime_monitor_merge_site_diagnostic_level($mail['level'] ?? 'unknown', 'warning');
+        } else {
+            $delivery_summary = (
+                !empty($dns_probe['summary'])
+                && in_array($dns_probe['level'] ?? 'unknown', ['warning', 'error'], true)
+            )
+                ? (string) $dns_probe['summary']
+                : 'No recent failures';
+        }
+
+        $mail['summary'] = $delivery_summary;
+        if (!empty($mail['mx_count']) || !empty($mail['spf']) || !empty($mail['dmarc'])) {
+            $mail['dns_summary'] = isset($dns_probe['summary']) ? (string) $dns_probe['summary'] : '';
+        }
+    } else {
+        $mail['dns_summary'] = isset($dns_probe['summary']) ? (string) $dns_probe['summary'] : '';
+    }
+
+    if (!empty($email_activity['warning'])) {
+        $mail['warning'] = (string) $email_activity['warning'];
+    }
+
+    return $mail;
+}
+
+function uptime_monitor_get_whm_mail_queue_summary($whm_user, $whm_api_token, $server_url) {
+    $response = uptime_monitor_whm_api_request($whm_user, $whm_api_token, $server_url, 'json-api/fetch_mail_queue?api.version=1');
+    if (empty($response['ok'])) {
+        return [
+            'level'   => 'unknown',
+            'summary' => 'Unavailable',
+            'warning' => 'Unable to retrieve mail queue: ' . ($response['error'] ?? 'Unknown error'),
+        ];
+    }
+
+    $payload = uptime_monitor_get_whm_payload_data($response['data']);
+    $records = [];
+    if (is_array($payload) && !empty($payload['records']) && is_array($payload['records'])) {
+        $records = $payload['records'];
+    }
+
+    $count = 0;
+    $frozen = 0;
+    $total_bytes = 0.0;
+    $oldest_time = null;
+    $users = [];
+
+    foreach ($records as $record) {
+        if (!is_array($record)) {
+            continue;
+        }
+
+        $count++;
+        if (!empty($record['frozen'])) {
+            $frozen++;
+        }
+        if (isset($record['size']) && is_numeric($record['size'])) {
+            $total_bytes += (float) $record['size'];
+        }
+        if (isset($record['time']) && is_numeric($record['time'])) {
+            $record_time = (int) $record['time'];
+            if ($oldest_time === null || $record_time < $oldest_time) {
+                $oldest_time = $record_time;
+            }
+        }
+
+        $user = isset($record['user']) && is_scalar($record['user']) ? trim((string) $record['user']) : '';
+        if ($user !== '') {
+            if (!isset($users[$user])) {
+                $users[$user] = 0;
+            }
+            $users[$user]++;
+        }
+    }
+
+    arsort($users, SORT_NUMERIC);
+    $top_users = [];
+    foreach (array_slice($users, 0, 3, true) as $user => $user_count) {
+        $top_users[] = $user . ' (' . number_format_i18n($user_count) . ')';
+    }
+
+    $summary = ($count > 0)
+        ? (number_format_i18n($count) . ' queued' . ($frozen > 0 ? ' / ' . number_format_i18n($frozen) . ' frozen' : ''))
+        : 'Queue empty';
+    $level = 'ok';
+    if ($frozen > 0) {
+        $level = 'error';
+    } elseif ($count > 0) {
+        $level = 'warning';
+    }
+
+    return [
+        'level'        => $level,
+        'summary'      => $summary,
+        'count'        => $count,
+        'frozen'       => $frozen,
+        'oldest_time'  => $oldest_time,
+        'total_bytes'  => $total_bytes,
+        'top_users'    => $top_users,
+        'warning'      => '',
+    ];
+}
+
+function uptime_monitor_get_whm_backup_health($whm_user, $whm_api_token, $server_url, $accounts = []) {
+    $backup = [
+        'level'          => 'unknown',
+        'summary'        => 'Unavailable',
+        'type'           => '',
+        'schedule'       => [],
+        'destinations'   => [],
+        'metadata_users' => [],
+        'warning'        => '',
+        'enabled'        => null,
+    ];
+
+    $config_response = uptime_monitor_whm_api_request($whm_user, $whm_api_token, $server_url, 'json-api/backup_config_get?api.version=1');
+    if (!empty($config_response['ok'])) {
+        $payload = uptime_monitor_get_whm_payload_data($config_response['data']);
+        $config = (is_array($payload) && !empty($payload['backup_config']) && is_array($payload['backup_config']))
+            ? $payload['backup_config']
+            : [];
+
+        $backup['enabled'] = uptime_monitor_parse_boolean_int($config['backupenable'] ?? null);
+        $backup['type'] = isset($config['backuptype']) && is_scalar($config['backuptype']) ? trim((string) $config['backuptype']) : '';
+
+        if (!empty($config['backup_daily_enable'])) {
+            $retention = isset($config['backup_daily_retention']) && is_numeric($config['backup_daily_retention']) ? (int) $config['backup_daily_retention'] : 0;
+            $backup['schedule'][] = 'Daily' . ($retention > 0 ? ' x' . $retention : '');
+        }
+        if (!empty($config['backup_weekly_enable'])) {
+            $retention = isset($config['backup_weekly_retention']) && is_numeric($config['backup_weekly_retention']) ? (int) $config['backup_weekly_retention'] : 0;
+            $backup['schedule'][] = 'Weekly' . ($retention > 0 ? ' x' . $retention : '');
+        }
+        if (!empty($config['backup_monthly_enable'])) {
+            $retention = isset($config['backup_monthly_retention']) && is_numeric($config['backup_monthly_retention']) ? (int) $config['backup_monthly_retention'] : 0;
+            $backup['schedule'][] = 'Monthly' . ($retention > 0 ? ' x' . $retention : '');
+        }
+    } else {
+        $backup['warning'] = uptime_monitor_append_warning_text($backup['warning'], 'Unable to retrieve backup configuration: ' . ($config_response['error'] ?? 'Unknown error'));
+    }
+
+    $destination_response = uptime_monitor_whm_api_request($whm_user, $whm_api_token, $server_url, 'json-api/backup_destination_list?api.version=1');
+    if (!empty($destination_response['ok'])) {
+        $payload = uptime_monitor_get_whm_payload_data($destination_response['data']);
+        $destinations = (is_array($payload) && !empty($payload['destination_list']) && is_array($payload['destination_list']))
+            ? $payload['destination_list']
+            : [];
+
+        foreach ($destinations as $destination) {
+            if (!is_array($destination)) {
+                continue;
+            }
+
+            $backup['destinations'][] = [
+                'name'          => isset($destination['name']) && is_scalar($destination['name']) ? trim((string) $destination['name']) : '',
+                'type'          => isset($destination['type']) && is_scalar($destination['type']) ? trim((string) $destination['type']) : '',
+                'disabled'      => !empty($destination['disabled']),
+                'disable_reason' => isset($destination['disable_reason']) && is_scalar($destination['disable_reason']) ? trim((string) $destination['disable_reason']) : '',
+                'path'          => isset($destination['path']) && is_scalar($destination['path']) ? trim((string) $destination['path']) : '',
+                'host'          => isset($destination['host']) && is_scalar($destination['host']) ? trim((string) $destination['host']) : '',
+            ];
+        }
+    } else {
+        $backup['warning'] = uptime_monitor_append_warning_text($backup['warning'], 'Unable to retrieve backup destinations: ' . ($destination_response['error'] ?? 'Unknown error'));
+    }
+
+    $metadata_response = uptime_monitor_whm_api_request($whm_user, $whm_api_token, $server_url, 'json-api/get_users_and_domains_with_backup_metadata?api.version=1');
+    if (!empty($metadata_response['ok'])) {
+        $payload = uptime_monitor_get_whm_payload_data($metadata_response['data']);
+        if (is_array($payload)) {
+            foreach ($payload as $user => $domain) {
+                $normalized_user = uptime_monitor_normalize_lookup_key($user);
+                if ($normalized_user === '') {
+                    continue;
+                }
+                $backup['metadata_users'][$normalized_user] = is_scalar($domain) ? trim((string) $domain) : '';
+            }
+        }
+    } else {
+        $backup['warning'] = uptime_monitor_append_warning_text($backup['warning'], 'Unable to retrieve backup metadata visibility: ' . ($metadata_response['error'] ?? 'Unknown error'));
+    }
+
+    $enabled_destination_count = 0;
+    foreach ($backup['destinations'] as $destination) {
+        if (empty($destination['disabled'])) {
+            $enabled_destination_count++;
+        }
+    }
+
+    if ($backup['enabled'] === true) {
+        $backup['summary'] = 'Backups enabled';
+        $backup['level'] = ($enabled_destination_count > 0 || empty($backup['destinations'])) ? 'ok' : 'warning';
+    } elseif ($backup['enabled'] === false) {
+        $backup['summary'] = 'Backups disabled';
+        $backup['level'] = 'warning';
+    } elseif (!empty($backup['warning'])) {
+        $backup['summary'] = 'Unavailable';
+        $backup['level'] = 'unknown';
+    }
+
+    if (!empty($backup['warning']) && $backup['level'] === 'ok') {
+        $backup['level'] = 'warning';
+    }
+
+    return $backup;
+}
+
+function uptime_monitor_get_diagnostics_db_inventory_cache($force_refresh = false) {
+    if ($force_refresh) {
+        return [];
+    }
+
+    $cache = get_transient(uptime_monitor_get_diagnostics_db_inventory_cache_key());
+    return is_array($cache) ? $cache : [];
+}
+
+function uptime_monitor_save_diagnostics_db_inventory_cache($cache) {
+    if (!is_array($cache)) {
+        $cache = [];
+    }
+
+    set_transient(uptime_monitor_get_diagnostics_db_inventory_cache_key(), $cache, 6 * HOUR_IN_SECONDS);
+}
+
+function uptime_monitor_get_whm_database_inventory_for_user($whm_user, $whm_api_token, $server_url, $username) {
+    $username = trim((string) $username);
+    if ($username === '') {
+        return 'Missing cPanel username for database inventory lookup.';
+    }
+
+    $response = uptime_monitor_whm_api_request(
+        $whm_user,
+        $whm_api_token,
+        $server_url,
+        'json-api/list_mysql_databases_and_users?api.version=1&user=' . rawurlencode($username)
+    );
+    if (empty($response['ok'])) {
+        return 'Unable to retrieve MySQL inventory for ' . $username . ': ' . ($response['error'] ?? 'Unknown error');
+    }
+
+    $payload = uptime_monitor_get_whm_payload_data($response['data']);
+    $database_map = (is_array($payload) && !empty($payload['mysql_databases']) && is_array($payload['mysql_databases']))
+        ? $payload['mysql_databases']
+        : [];
+    $config = (is_array($payload) && !empty($payload['mysql_config']) && is_array($payload['mysql_config']))
+        ? $payload['mysql_config']
+        : [];
+
+    $database_names = array_keys($database_map);
+    $database_users = [];
+    foreach ($database_map as $database_user_list) {
+        if (!is_array($database_user_list)) {
+            continue;
+        }
+        foreach ($database_user_list as $database_user) {
+            if (!is_scalar($database_user)) {
+                continue;
+            }
+            $database_users[(string) $database_user] = true;
+        }
+    }
+
+    return [
+        'username'            => $username,
+        'database_count'      => count($database_names),
+        'database_user_count' => count($database_users),
+        'database_names'      => array_values(array_map('strval', $database_names)),
+        'mysql_version'       => isset($config['mysql-version']) && is_scalar($config['mysql-version']) ? trim((string) $config['mysql-version']) : '',
+        'prefix_length'       => isset($config['prefix_length']) && is_numeric($config['prefix_length']) ? (int) $config['prefix_length'] : null,
+        'use_db_prefix'       => uptime_monitor_parse_boolean_int($config['use_db_prefix'] ?? null),
+        'fetched_at'          => time(),
+    ];
+}
+
+function uptime_monitor_summarize_database_inventory($cache, $usernames, $warning = '', $total_pending = 0, $processed_pending = 0) {
+    $cache = is_array($cache) ? $cache : [];
+    $usernames = array_values(array_unique(array_filter(array_map('strval', (array) $usernames), 'strlen')));
+
+    $database_count = 0;
+    $database_user_count = 0;
+    $covered_users = 0;
+    $mysql_version = '';
+    $top_accounts = [];
+
+    foreach ($usernames as $username) {
+        if (!isset($cache[$username]) || !is_array($cache[$username])) {
+            continue;
+        }
+
+        $covered_users++;
+        $database_count += isset($cache[$username]['database_count']) ? (int) $cache[$username]['database_count'] : 0;
+        $database_user_count += isset($cache[$username]['database_user_count']) ? (int) $cache[$username]['database_user_count'] : 0;
+        if ($mysql_version === '' && !empty($cache[$username]['mysql_version'])) {
+            $mysql_version = (string) $cache[$username]['mysql_version'];
+        }
+        $top_accounts[$username] = isset($cache[$username]['database_count']) ? (int) $cache[$username]['database_count'] : 0;
+    }
+
+    arsort($top_accounts, SORT_NUMERIC);
+    $top_account_lines = [];
+    foreach (array_slice($top_accounts, 0, 3, true) as $username => $count) {
+        if ($count <= 0) {
+            continue;
+        }
+        $top_account_lines[] = $username . ' (' . number_format_i18n($count) . ')';
+    }
+
+    $summary = ($covered_users > 0)
+        ? (number_format_i18n($database_count) . ' DBs / ' . number_format_i18n($database_user_count) . ' users')
+        : 'Inventory pending';
+    $level = ($warning !== '') ? 'warning' : (($covered_users > 0) ? 'ok' : 'unknown');
+    if (!empty($usernames) && $covered_users < count($usernames) && $warning === '') {
+        $level = 'warning';
+    }
+
+    return [
+        'level'               => $level,
+        'summary'             => $summary,
+        'database_count'      => $database_count,
+        'database_user_count' => $database_user_count,
+        'covered_users'       => $covered_users,
+        'total_users'         => count($usernames),
+        'mysql_version'       => $mysql_version,
+        'top_accounts'        => $top_account_lines,
+        'warning'             => $warning,
+        'pending_total'       => max(0, (int) $total_pending),
+        'pending_processed'   => max(0, (int) $processed_pending),
+    ];
+}
+
+function uptime_monitor_apply_diagnostics_account_enrichments(&$bundle, $db_cache = []) {
+    if (!is_array($bundle)) {
+        return;
+    }
+
+    $accounts = isset($bundle['server_stats']['accounts']) && is_array($bundle['server_stats']['accounts'])
+        ? $bundle['server_stats']['accounts']
+        : [];
+    $php_inventory = isset($bundle['php_inventory']) && is_array($bundle['php_inventory']) ? $bundle['php_inventory'] : [];
+    $backup_health = isset($bundle['backup_health']) && is_array($bundle['backup_health']) ? $bundle['backup_health'] : [];
+    $db_cache = is_array($db_cache) ? $db_cache : [];
+
+    $php_by_user = isset($php_inventory['by_user']) && is_array($php_inventory['by_user']) ? $php_inventory['by_user'] : [];
+    $metadata_users = isset($backup_health['metadata_users']) && is_array($backup_health['metadata_users']) ? $backup_health['metadata_users'] : [];
+
+    foreach ($accounts as &$account) {
+        if (!is_array($account)) {
+            continue;
+        }
+
+        $user = isset($account['username']) ? trim((string) $account['username']) : '';
+        $normalized_user = uptime_monitor_normalize_lookup_key($user);
+        $account['package'] = uptime_monitor_get_account_package_name($account);
+        $account['backup_metadata_available'] = ($normalized_user !== '' && isset($metadata_users[$normalized_user]));
+        $account['backup_metadata_domain'] = ($normalized_user !== '' && isset($metadata_users[$normalized_user]))
+            ? (string) $metadata_users[$normalized_user]
+            : '';
+
+        if ($user !== '' && isset($php_by_user[$user]) && is_array($php_by_user[$user])) {
+            $account['php_version_summary'] = isset($php_by_user[$user]['version_summary']) ? (string) $php_by_user[$user]['version_summary'] : '';
+            $account['php_fpm_summary'] = isset($php_by_user[$user]['php_fpm_summary']) ? (string) $php_by_user[$user]['php_fpm_summary'] : '';
+        } else {
+            $account['php_version_summary'] = '';
+            $account['php_fpm_summary'] = '';
+        }
+
+        if ($user !== '' && isset($db_cache[$user]) && is_array($db_cache[$user])) {
+            $account['database_count'] = isset($db_cache[$user]['database_count']) ? (int) $db_cache[$user]['database_count'] : null;
+            $account['database_user_count'] = isset($db_cache[$user]['database_user_count']) ? (int) $db_cache[$user]['database_user_count'] : null;
+        } else {
+            $account['database_count'] = null;
+            $account['database_user_count'] = null;
+        }
+    }
+    unset($account);
+
+    $bundle['server_stats']['accounts'] = $accounts;
+    $bundle['account_map'] = uptime_monitor_build_diagnostics_account_map($accounts);
+}
+
+function uptime_monitor_get_diagnostics_server_bundle($force_refresh = false) {
+    $cache_key = uptime_monitor_get_diagnostics_server_bundle_cache_key();
+    if (!$force_refresh) {
+        $cached = get_transient($cache_key);
+        if (is_array($cached)) {
+            $db_cache = uptime_monitor_get_diagnostics_db_inventory_cache(false);
+            $cached['database_inventory'] = uptime_monitor_summarize_database_inventory(
+                $db_cache,
+                array_values(array_filter(array_map(function($account) {
+                    return is_array($account) && !empty($account['username']) ? (string) $account['username'] : '';
+                }, $cached['server_stats']['accounts'] ?? []), 'strlen'))
+            );
+            uptime_monitor_apply_diagnostics_account_enrichments($cached, $db_cache);
+            return $cached;
+        }
+    }
+
+    $whm_user = get_option('uptime_monitor_whm_user', '');
+    $whm_api_token = get_option('uptime_monitor_whm_api_token', '');
+    $server_url = get_option('uptime_monitor_whm_server_url', '');
+
+    $bundle = [
+        'server_stats'        => get_whm_server_stats(),
+        'ssl_inventory'       => [],
+        'php_inventory'       => [],
+        'email_activity'      => [],
+        'mail_queue'          => [
+            'level'   => 'unknown',
+            'summary' => 'Unavailable',
+            'warning' => '',
+        ],
+        'backup_health'       => [
+            'level'          => 'unknown',
+            'summary'        => 'Unavailable',
+            'type'           => '',
+            'schedule'       => [],
+            'destinations'   => [],
+            'metadata_users' => [],
+            'warning'        => '',
+            'enabled'        => null,
+        ],
+        'database_inventory'  => [
+            'level'               => 'unknown',
+            'summary'             => 'Inventory pending',
+            'database_count'      => 0,
+            'database_user_count' => 0,
+            'covered_users'       => 0,
+            'total_users'         => 0,
+            'mysql_version'       => '',
+            'top_accounts'        => [],
+            'warning'             => '',
+            'pending_total'       => 0,
+            'pending_processed'   => 0,
+        ],
+        'account_map'         => [],
+        'generated_at'        => time(),
+    ];
+
+    if (!empty($whm_user) && !empty($whm_api_token) && !empty($server_url)) {
+        $ssl_inventory = uptime_monitor_get_whm_ssl_vhost_inventory($whm_user, $whm_api_token, $server_url);
+        $bundle['ssl_inventory'] = is_array($ssl_inventory) ? $ssl_inventory : ['warning' => (string) $ssl_inventory, 'entries' => []];
+
+        $php_inventory = uptime_monitor_get_whm_php_vhost_versions($whm_user, $whm_api_token, $server_url);
+        $bundle['php_inventory'] = is_array($php_inventory) ? $php_inventory : ['warning' => (string) $php_inventory, 'by_user' => [], 'by_vhost' => []];
+
+        $email_activity = uptime_monitor_get_whm_email_track_activity($whm_user, $whm_api_token, $server_url);
+        $bundle['email_activity'] = is_array($email_activity) ? $email_activity : ['warning' => (string) $email_activity, 'available' => false, 'by_user' => [], 'by_domain' => []];
+
+        $bundle['mail_queue'] = uptime_monitor_get_whm_mail_queue_summary($whm_user, $whm_api_token, $server_url);
+        $bundle['backup_health'] = uptime_monitor_get_whm_backup_health(
+            $whm_user,
+            $whm_api_token,
+            $server_url,
+            $bundle['server_stats']['accounts'] ?? []
+        );
+    }
+
+    $db_cache = uptime_monitor_get_diagnostics_db_inventory_cache($force_refresh);
+    $usernames = [];
+    foreach (($bundle['server_stats']['accounts'] ?? []) as $account) {
+        if (!is_array($account) || empty($account['username'])) {
+            continue;
+        }
+        $usernames[] = (string) $account['username'];
+    }
+    $bundle['database_inventory'] = uptime_monitor_summarize_database_inventory($db_cache, $usernames);
+    uptime_monitor_apply_diagnostics_account_enrichments($bundle, $db_cache);
+
+    set_transient($cache_key, $bundle, 30 * MINUTE_IN_SECONDS);
+    return $bundle;
+}
+
 function uptime_monitor_domain_ends_with($value, $suffix) {
     $value = uptime_monitor_normalize_lookup_key($value);
     $suffix = uptime_monitor_normalize_lookup_key($suffix);
@@ -3386,7 +4564,7 @@ function uptime_monitor_merge_site_diagnostic_level($current, $candidate) {
 }
 
 function uptime_monitor_get_site_diagnostics_cache_key($site_url) {
-    return 'uptime_monitor_diag_v3_' . md5((string) $site_url);
+    return 'uptime_monitor_diag_v4_' . md5((string) $site_url);
 }
 
 function uptime_monitor_extract_certificate_names($subject_alt_name) {
@@ -3444,6 +4622,7 @@ function uptime_monitor_get_site_certificate_details($host, $port = 443) {
         'days_remaining' => null,
         'host_matches'   => null,
         'names'          => [],
+        'source'         => 'tls',
     ];
 
     $host = uptime_monitor_normalize_lookup_key($host);
@@ -3714,20 +4893,56 @@ function uptime_monitor_get_site_diagnostics($site_url, $server_stats = [], $for
         }
     }
 
+    $bundle = is_array($server_stats) && isset($server_stats['server_stats']) && is_array($server_stats['server_stats'])
+        ? $server_stats
+        : ['server_stats' => $server_stats];
     $site_host = uptime_monitor_normalize_lookup_key($site_url);
     $site_scheme = strtolower((string) parse_url((string) $site_url, PHP_URL_SCHEME));
     $site_port = (int) parse_url((string) $site_url, PHP_URL_PORT);
     if ($site_scheme !== 'https' || $site_port <= 0) {
         $site_port = 443;
     }
-    $accounts = isset($server_stats['accounts']) && is_array($server_stats['accounts']) ? $server_stats['accounts'] : [];
 
-    $ssl = uptime_monitor_get_site_certificate_details($site_host, $site_port);
+    $server_stats = isset($bundle['server_stats']) && is_array($bundle['server_stats']) ? $bundle['server_stats'] : [];
+    $accounts = isset($server_stats['accounts']) && is_array($server_stats['accounts']) ? $server_stats['accounts'] : [];
     $ipv4 = uptime_monitor_get_site_ipv4_details($site_host);
-    $account_match = uptime_monitor_find_account_for_site_host($site_host, $accounts, $ssl['names'] ?? [], $ipv4['ips'] ?? []);
+
+    $ssl_inventory = isset($bundle['ssl_inventory']) && is_array($bundle['ssl_inventory']) ? $bundle['ssl_inventory'] : [];
+    $whm_ssl_entry = uptime_monitor_find_whm_ssl_entry_for_host($site_host, $ssl_inventory);
+    $ssl = !empty($whm_ssl_entry)
+        ? uptime_monitor_get_site_certificate_details_from_whm_entry($site_host, $whm_ssl_entry)
+        : uptime_monitor_get_site_certificate_details($site_host, $site_port);
+
+    $ssl_names_for_match = [];
+    if (!empty($whm_ssl_entry)) {
+        foreach (array_merge($whm_ssl_entry['domains'] ?? [], $whm_ssl_entry['cert_domains'] ?? [], $ssl['names'] ?? []) as $ssl_name) {
+            $normalized_name = uptime_monitor_normalize_certificate_lookup_key($ssl_name);
+            if ($normalized_name !== '') {
+                $ssl_names_for_match[] = $normalized_name;
+            }
+        }
+        $ssl_names_for_match = array_values(array_unique($ssl_names_for_match));
+    } else {
+        $ssl_names_for_match = isset($ssl['names']) && is_array($ssl['names']) ? $ssl['names'] : [];
+    }
+
+    $account_match = uptime_monitor_find_account_for_site_host($site_host, $accounts, $ssl_names_for_match, $ipv4['ips'] ?? []);
     $account = isset($account_match['account']) && is_array($account_match['account']) ? $account_match['account'] : [];
+    $account = uptime_monitor_resolve_account_from_bundle($bundle, $account);
     $account_domain = is_array($account) ? (string) ($account['domain'] ?? '') : '';
-    $mail = uptime_monitor_get_mail_domain_probe($site_host, $account_domain);
+
+    $mail_dns = uptime_monitor_get_mail_domain_probe($site_host, $account_domain);
+    $email_activity = uptime_monitor_get_email_activity_for_site(
+        $site_host,
+        $account,
+        isset($bundle['email_activity']) ? $bundle['email_activity'] : []
+    );
+    $mail = uptime_monitor_merge_mail_diagnostics($mail_dns, $email_activity);
+    $php = uptime_monitor_get_php_details_for_site(
+        $site_host,
+        $account,
+        isset($bundle['php_inventory']) ? $bundle['php_inventory'] : []
+    );
 
     $overall_level = 'ok';
     $overall_level = uptime_monitor_merge_site_diagnostic_level($overall_level, $ssl['level'] ?? 'unknown');
@@ -3753,10 +4968,12 @@ function uptime_monitor_get_site_diagnostics($site_url, $server_stats = [], $for
         'ipv4'             => $ipv4,
         'ssl'              => $ssl,
         'mail'             => $mail,
+        'php'              => $php,
+        'ssl_inventory'    => $whm_ssl_entry,
         'checked_at'       => time(),
     ];
 
-    set_transient($cache_key, $diagnostics, 6 * HOUR_IN_SECONDS);
+    set_transient($cache_key, $diagnostics, HOUR_IN_SECONDS);
 
     return $diagnostics;
 }
@@ -3934,6 +5151,8 @@ function get_whm_server_stats() {
             'username'       => $username,
             'domain'         => $domain,
             'ip_address'     => uptime_monitor_get_account_ip_address($account),
+            'package'        => uptime_monitor_get_account_package_name($account),
+            'owner'          => isset($account['owner']) && is_scalar($account['owner']) ? trim((string) $account['owner']) : '',
             'disk_used_mb'   => $disk_used_mb,
             'disk_limit_mb'  => $has_disk_limit ? $disk_limit_mb : null,
             'disk_free_mb'   => $disk_free_mb,
@@ -5586,141 +6805,384 @@ function uptime_monitor_page() {
     echo '</div>';
 }
 
-function uptime_monitor_diagnostics_page() {
-    if (!current_user_can('manage_options')) {
+function uptime_monitor_diagnostics_error_looks_like_permission_denied($message) {
+    if (!is_string($message) || $message === '') {
+        return false;
+    }
+
+    $message = strtolower($message);
+    return (strpos($message, 'permission denied') !== false || strpos($message, 'required privileges') !== false);
+}
+
+function uptime_monitor_initialize_diagnostics_job_state($force_refresh = false) {
+    $sites = uptime_monitor_get_mainwp_sites(true);
+    $site_urls = array_keys($sites);
+    natcasesort($site_urls);
+    $site_urls = array_values($site_urls);
+
+    $server_bundle = uptime_monitor_get_diagnostics_server_bundle($force_refresh);
+    $db_cache = uptime_monitor_get_diagnostics_db_inventory_cache($force_refresh);
+
+    $db_users = [];
+    foreach (($server_bundle['server_stats']['accounts'] ?? []) as $account) {
+        if (!is_array($account) || empty($account['username'])) {
+            continue;
+        }
+        $db_users[] = (string) $account['username'];
+    }
+    $db_users = array_values(array_unique(array_filter($db_users, 'strlen')));
+
+    $pending_db_users = [];
+    foreach ($db_users as $db_user) {
+        if (!isset($db_cache[$db_user]) || !is_array($db_cache[$db_user])) {
+            $pending_db_users[] = $db_user;
+        }
+    }
+
+    $server_bundle['database_inventory'] = uptime_monitor_summarize_database_inventory(
+        $db_cache,
+        $db_users,
+        '',
+        count($pending_db_users),
+        0
+    );
+    uptime_monitor_apply_diagnostics_account_enrichments($server_bundle, $db_cache);
+
+    return [
+        'force_refresh'   => !empty($force_refresh),
+        'sites'           => $sites,
+        'site_urls'       => $site_urls,
+        'sites_total'     => count($site_urls),
+        'offset'          => 0,
+        'results'         => get_option('uptime_monitor_results', []),
+        'last_checked'    => get_option('uptime_monitor_last_checked', []),
+        'rows'            => [],
+        'summary'         => [
+            'sites'             => count($site_urls),
+            'sites_down'        => 0,
+            'ssl_issues'        => 0,
+            'mail_issues'       => 0,
+            'unmatched_account' => 0,
+        ],
+        'server_bundle'   => $server_bundle,
+        'db_cache'        => $db_cache,
+        'all_db_users'    => $db_users,
+        'pending_db_users'=> $pending_db_users,
+        'db_total'        => count($pending_db_users),
+        'db_offset'       => 0,
+        'db_warning'      => '',
+    ];
+}
+
+function uptime_monitor_process_diagnostics_site_batch(&$state, $batch_site_urls) {
+    $batch_site_urls = array_values(array_filter(array_map('strval', (array) $batch_site_urls), 'strlen'));
+    if (empty($batch_site_urls)) {
         return;
     }
 
-    $force_refresh = false;
-    if (isset($_POST['refresh_site_diagnostics'])) {
-        check_admin_referer('uptime_monitor_refresh_site_diagnostics', 'uptime_monitor_refresh_site_diagnostics_nonce');
-        $force_refresh = true;
-    }
+    $results = isset($state['results']) && is_array($state['results']) ? $state['results'] : [];
+    $last_checked = isset($state['last_checked']) && is_array($state['last_checked']) ? $state['last_checked'] : [];
+    $sites = isset($state['sites']) && is_array($state['sites']) ? $state['sites'] : [];
+    $server_bundle = isset($state['server_bundle']) && is_array($state['server_bundle']) ? $state['server_bundle'] : [];
+    $accounts_visible = isset($server_bundle['server_stats']['accounts']) && is_array($server_bundle['server_stats']['accounts'])
+        ? $server_bundle['server_stats']['accounts']
+        : [];
 
-    $server_stats = get_whm_server_stats();
-    $sites = uptime_monitor_get_mainwp_sites(true);
-    $results = get_option('uptime_monitor_results', []);
-    $last_checked = get_option('uptime_monitor_last_checked', []);
-
-    echo '<div class="wrap">';
-    echo '<h1>Site Diagnostics</h1>';
-    echo '<p class="uptime-monitor-plugin-report-intro">This view adds hosting info, SSL expiry checks, and mail DNS readiness checks on top of the MainWP uptime report. When a site cannot be tied to a WHM account confidently, the diagnostics table falls back to the site&apos;s IPv4 record.</p>';
-
-    if ($force_refresh) {
-        echo '<div class="notice notice-success"><p>Site diagnostics refreshed.</p></div>';
-    }
-    if (!empty($server_stats['error'])) {
-        echo '<div class="notice notice-error"><p>' . esc_html((string) $server_stats['error']) . '</p></div>';
-    }
-
-    echo '<div class="uptime-monitor-report-actions">';
-    echo '<form method="post" action="' . esc_url(admin_url('admin.php?page=uptime-monitor-diagnostics')) . '" class="uptime-monitor-report-refresh-form">';
-    wp_nonce_field('uptime_monitor_refresh_site_diagnostics', 'uptime_monitor_refresh_site_diagnostics_nonce');
-    echo '<button type="submit" name="refresh_site_diagnostics" class="button button-primary">Refresh Diagnostics</button>';
-    echo '</form>';
-    echo '<a href="' . esc_url(admin_url('admin.php?page=uptime-monitor')) . '" class="button button-secondary">Back to Uptime Monitor</a>';
-    echo '</div>';
-
-    $rows = [];
-    $summary = [
-        'sites'            => count($sites),
-        'sites_down'       => 0,
-        'ssl_issues'       => 0,
-        'mail_issues'      => 0,
-        'unmatched_account' => 0,
-    ];
-
-    $accounts_visible = isset($server_stats['accounts']) && is_array($server_stats['accounts']) ? $server_stats['accounts'] : [];
-
-    foreach ($sites as $site_info) {
-        $site_url = isset($site_info['site_url']) ? (string) $site_info['site_url'] : '';
-        if ($site_url === '') {
+    foreach ($batch_site_urls as $site_url) {
+        if (!isset($sites[$site_url]) || !is_array($sites[$site_url])) {
             continue;
         }
 
-        $diagnostics = uptime_monitor_get_site_diagnostics($site_url, $server_stats, $force_refresh);
+        $site_info = $sites[$site_url];
+        $diagnostics = uptime_monitor_get_site_diagnostics($site_url, $server_bundle, !empty($state['force_refresh']));
         $result = isset($results[$site_url]) && is_array($results[$site_url]) ? $results[$site_url] : [];
         $is_down = uptime_monitor_result_is_down($result);
 
         if ($is_down) {
-            $summary['sites_down']++;
+            $state['summary']['sites_down']++;
         }
         if (in_array($diagnostics['ssl']['level'] ?? 'unknown', ['warning', 'error'], true)) {
-            $summary['ssl_issues']++;
+            $state['summary']['ssl_issues']++;
         }
         if (in_array($diagnostics['mail']['level'] ?? 'unknown', ['warning', 'error'], true)) {
-            $summary['mail_issues']++;
+            $state['summary']['mail_issues']++;
         }
         if (empty($diagnostics['account']) && !empty($accounts_visible)) {
-            $summary['unmatched_account']++;
+            $state['summary']['unmatched_account']++;
         }
 
-        $rows[] = [
-            'site_url'      => $site_url,
-            'tags'          => isset($site_info['tags']) ? (string) $site_info['tags'] : '',
-            'result'        => $result,
-            'diagnostics'   => $diagnostics,
-            'last_checked'  => isset($last_checked[$site_url]) ? (int) $last_checked[$site_url] : 0,
-            'is_down'       => $is_down,
+        $state['rows'][] = [
+            'site_url'     => $site_url,
+            'site_name'    => isset($site_info['name']) ? (string) $site_info['name'] : '',
+            'tags'         => isset($site_info['tags']) ? (string) $site_info['tags'] : '',
+            'result'       => $result,
+            'diagnostics'  => $diagnostics,
+            'last_checked' => isset($last_checked[$site_url]) ? (int) $last_checked[$site_url] : 0,
+            'is_down'      => $is_down,
         ];
     }
 
+    $state['offset'] += count($batch_site_urls);
+}
+
+function uptime_monitor_process_diagnostics_database_batch(&$state) {
+    if (empty($state['pending_db_users']) || !is_array($state['pending_db_users'])) {
+        return;
+    }
+
+    if (($state['db_offset'] ?? 0) >= ($state['db_total'] ?? 0)) {
+        return;
+    }
+
+    $whm_user = get_option('uptime_monitor_whm_user', '');
+    $whm_api_token = get_option('uptime_monitor_whm_api_token', '');
+    $server_url = get_option('uptime_monitor_whm_server_url', '');
+    if ($whm_user === '' || $whm_api_token === '' || $server_url === '') {
+        $state['db_warning'] = uptime_monitor_append_warning_text($state['db_warning'], 'Database inventory requires WHM credentials.');
+        $state['db_offset'] = (int) ($state['db_total'] ?? 0);
+        $state['server_bundle']['database_inventory'] = uptime_monitor_summarize_database_inventory(
+            $state['db_cache'] ?? [],
+            $state['all_db_users'] ?? [],
+            $state['db_warning'],
+            $state['db_total'] ?? 0,
+            $state['db_offset'] ?? 0
+        );
+        return;
+    }
+
+    $batch_size = uptime_monitor_get_diagnostics_db_batch_size(!empty($state['force_refresh']));
+    $batch_users = array_slice((array) $state['pending_db_users'], (int) $state['db_offset'], $batch_size);
+
+    foreach ($batch_users as $db_user) {
+        $inventory = uptime_monitor_get_whm_database_inventory_for_user($whm_user, $whm_api_token, $server_url, $db_user);
+        if (is_array($inventory)) {
+            $state['db_cache'][$db_user] = $inventory;
+        } else {
+            $state['db_warning'] = uptime_monitor_append_warning_text($state['db_warning'], (string) $inventory);
+            if (uptime_monitor_diagnostics_error_looks_like_permission_denied((string) $inventory)) {
+                $state['db_offset'] = (int) ($state['db_total'] ?? 0);
+                break;
+            }
+        }
+
+        $state['db_offset'] = (int) ($state['db_offset'] ?? 0) + 1;
+    }
+
+    if (($state['db_offset'] ?? 0) > (int) ($state['db_total'] ?? 0)) {
+        $state['db_offset'] = (int) ($state['db_total'] ?? 0);
+    }
+
+    $state['server_bundle']['database_inventory'] = uptime_monitor_summarize_database_inventory(
+        $state['db_cache'] ?? [],
+        $state['all_db_users'] ?? [],
+        $state['db_warning'],
+        $state['db_total'] ?? 0,
+        $state['db_offset'] ?? 0
+    );
+    uptime_monitor_apply_diagnostics_account_enrichments($state['server_bundle'], $state['db_cache'] ?? []);
+}
+
+function uptime_monitor_finalize_diagnostics_job_state($state) {
+    $rows = isset($state['rows']) && is_array($state['rows']) ? $state['rows'] : [];
     usort($rows, function($a, $b) {
         $a_rank = uptime_monitor_get_site_diagnostic_level_rank($a['diagnostics']['overall_level'] ?? 'unknown');
         $b_rank = uptime_monitor_get_site_diagnostic_level_rank($b['diagnostics']['overall_level'] ?? 'unknown');
         if ($a_rank !== $b_rank) {
             return $a_rank <=> $b_rank;
         }
-        if ($a['is_down'] !== $b['is_down']) {
-            return $a['is_down'] ? -1 : 1;
+        if (($a['is_down'] ?? false) !== ($b['is_down'] ?? false)) {
+            return !empty($a['is_down']) ? -1 : 1;
         }
-        return strcasecmp($a['site_url'], $b['site_url']);
+        return strcasecmp((string) ($a['site_url'] ?? ''), (string) ($b['site_url'] ?? ''));
     });
 
-    echo '<div class="uptime-monitor-overview-grid">';
-    echo '<div class="uptime-monitor-overview-card"><span class="uptime-monitor-overview-card-label">Sites</span><strong class="uptime-monitor-overview-card-value">' . esc_html(number_format($summary['sites'])) . '</strong></div>';
-    echo '<div class="uptime-monitor-overview-card"><span class="uptime-monitor-overview-card-label">Down Sites</span><strong class="uptime-monitor-overview-card-value">' . esc_html(number_format($summary['sites_down'])) . '</strong></div>';
-    echo '<div class="uptime-monitor-overview-card"><span class="uptime-monitor-overview-card-label">SSL Issues</span><strong class="uptime-monitor-overview-card-value">' . esc_html(number_format($summary['ssl_issues'])) . '</strong></div>';
-    echo '<div class="uptime-monitor-overview-card"><span class="uptime-monitor-overview-card-label">Mail Issues</span><strong class="uptime-monitor-overview-card-value">' . esc_html(number_format($summary['mail_issues'])) . '</strong></div>';
-    echo '<div class="uptime-monitor-overview-card"><span class="uptime-monitor-overview-card-label">Sites Without Account Match</span><strong class="uptime-monitor-overview-card-value">' . esc_html(number_format($summary['unmatched_account'])) . '</strong></div>';
+    uptime_monitor_save_diagnostics_db_inventory_cache($state['db_cache'] ?? []);
+
+    return [
+        'summary'      => isset($state['summary']) && is_array($state['summary']) ? $state['summary'] : [],
+        'rows'         => $rows,
+        'server_bundle'=> isset($state['server_bundle']) && is_array($state['server_bundle']) ? $state['server_bundle'] : [],
+    ];
+}
+
+function uptime_monitor_render_diagnostics_server_panel($title, $level, $summary, $lines = []) {
+    echo '<div class="uptime-monitor-diagnostics-panel">';
+    echo '<div class="uptime-monitor-diagnostics-panel-header">';
+    echo '<span class="uptime-monitor-overview-card-label">' . esc_html($title) . '</span>';
+    echo uptime_monitor_render_diagnostic_badge($level, $summary);
     echo '</div>';
 
+    if (!empty($lines)) {
+        echo '<div class="uptime-monitor-diagnostics-meta">';
+        foreach ($lines as $line) {
+            $line = trim((string) $line);
+            if ($line === '') {
+                continue;
+            }
+            echo '<span>' . esc_html($line) . '</span>';
+        }
+        echo '</div>';
+    }
+
+    echo '</div>';
+}
+
+function uptime_monitor_render_diagnostics_server_panels($bundle) {
+    $bundle = is_array($bundle) ? $bundle : [];
+    $mail_queue = isset($bundle['mail_queue']) && is_array($bundle['mail_queue']) ? $bundle['mail_queue'] : [];
+    $backup = isset($bundle['backup_health']) && is_array($bundle['backup_health']) ? $bundle['backup_health'] : [];
+    $db_inventory = isset($bundle['database_inventory']) && is_array($bundle['database_inventory']) ? $bundle['database_inventory'] : [];
+
+    echo '<h2>Server Signals</h2>';
+    echo '<div class="uptime-monitor-diagnostics-panel-grid">';
+
+    $mail_queue_lines = [];
+    if (!empty($mail_queue['oldest_time']) && is_numeric($mail_queue['oldest_time'])) {
+        $mail_queue_lines[] = 'Oldest: ' . uptime_monitor_format_duration_brief(time() - (int) $mail_queue['oldest_time']) . ' ago';
+    }
+    if (!empty($mail_queue['total_bytes'])) {
+        $mail_queue_lines[] = 'Queued size: ' . uptime_monitor_format_mb(((float) $mail_queue['total_bytes']) / (1024.0 * 1024.0));
+    }
+    if (!empty($mail_queue['top_users']) && is_array($mail_queue['top_users'])) {
+        $mail_queue_lines[] = 'Top users: ' . implode(', ', $mail_queue['top_users']);
+    }
+    if (!empty($mail_queue['warning'])) {
+        $mail_queue_lines[] = $mail_queue['warning'];
+    }
+    uptime_monitor_render_diagnostics_server_panel(
+        'Mail Queue',
+        $mail_queue['level'] ?? 'unknown',
+        $mail_queue['summary'] ?? 'Unavailable',
+        $mail_queue_lines
+    );
+
+    $backup_lines = [];
+    if (!empty($backup['type'])) {
+        $backup_lines[] = 'Type: ' . $backup['type'];
+    }
+    if (!empty($backup['schedule']) && is_array($backup['schedule'])) {
+        $backup_lines[] = 'Schedule: ' . implode(', ', $backup['schedule']);
+    }
+    if (!empty($backup['destinations']) && is_array($backup['destinations'])) {
+        $destination_total = count($backup['destinations']);
+        $enabled_total = 0;
+        foreach ($backup['destinations'] as $destination) {
+            if (empty($destination['disabled'])) {
+                $enabled_total++;
+            }
+        }
+        $backup_lines[] = 'Destinations: ' . number_format_i18n($enabled_total) . ' enabled / ' . number_format_i18n($destination_total) . ' total';
+    }
+    if (!empty($backup['metadata_users']) && is_array($backup['metadata_users'])) {
+        $backup_lines[] = 'Metadata accounts: ' . number_format_i18n(count($backup['metadata_users']));
+    }
+    if (!empty($backup['warning'])) {
+        $backup_lines[] = $backup['warning'];
+    }
+    uptime_monitor_render_diagnostics_server_panel(
+        'Backup Health',
+        $backup['level'] ?? 'unknown',
+        $backup['summary'] ?? 'Unavailable',
+        $backup_lines
+    );
+
+    $db_lines = [];
+    if (!empty($db_inventory['mysql_version'])) {
+        $db_lines[] = 'MySQL: ' . $db_inventory['mysql_version'];
+    }
+    if (isset($db_inventory['covered_users'], $db_inventory['total_users'])) {
+        $db_lines[] = 'Coverage: ' . number_format_i18n((int) $db_inventory['covered_users']) . ' / ' . number_format_i18n((int) $db_inventory['total_users']) . ' accounts';
+    }
+    if (!empty($db_inventory['top_accounts']) && is_array($db_inventory['top_accounts'])) {
+        $db_lines[] = 'Top accounts: ' . implode(', ', $db_inventory['top_accounts']);
+    }
+    if (!empty($db_inventory['warning'])) {
+        $db_lines[] = $db_inventory['warning'];
+    }
+    uptime_monitor_render_diagnostics_server_panel(
+        'Database Inventory',
+        $db_inventory['level'] ?? 'unknown',
+        $db_inventory['summary'] ?? 'Unavailable',
+        $db_lines
+    );
+
+    echo '</div>';
+}
+
+function uptime_monitor_render_diagnostics_results($report) {
+    $report = is_array($report) ? $report : [];
+    $summary = isset($report['summary']) && is_array($report['summary']) ? $report['summary'] : [];
+    $rows = isset($report['rows']) && is_array($report['rows']) ? $report['rows'] : [];
+    $bundle = isset($report['server_bundle']) && is_array($report['server_bundle']) ? $report['server_bundle'] : [];
+    $server_stats = isset($bundle['server_stats']) && is_array($bundle['server_stats']) ? $bundle['server_stats'] : [];
+    $accounts_visible = isset($server_stats['accounts']) && is_array($server_stats['accounts']) ? $server_stats['accounts'] : [];
+
+    if (!empty($server_stats['error'])) {
+        echo '<div class="notice notice-error"><p>' . esc_html((string) $server_stats['error']) . '</p></div>';
+    }
+
+    $warnings = [];
+    foreach (['ssl_inventory', 'php_inventory', 'email_activity'] as $warning_key) {
+        if (!empty($bundle[$warning_key]['warning'])) {
+            $warnings[] = (string) $bundle[$warning_key]['warning'];
+        }
+    }
+    if (!empty($warnings)) {
+        echo '<div class="notice notice-warning"><p>' . esc_html(implode(' ', $warnings)) . '</p></div>';
+    }
+
+    echo '<div class="uptime-monitor-overview-grid">';
+    echo '<div class="uptime-monitor-overview-card"><span class="uptime-monitor-overview-card-label">Sites</span><strong class="uptime-monitor-overview-card-value">' . esc_html(number_format_i18n((int) ($summary['sites'] ?? 0))) . '</strong></div>';
+    echo '<div class="uptime-monitor-overview-card"><span class="uptime-monitor-overview-card-label">Down Sites</span><strong class="uptime-monitor-overview-card-value">' . esc_html(number_format_i18n((int) ($summary['sites_down'] ?? 0))) . '</strong></div>';
+    echo '<div class="uptime-monitor-overview-card"><span class="uptime-monitor-overview-card-label">SSL Issues</span><strong class="uptime-monitor-overview-card-value">' . esc_html(number_format_i18n((int) ($summary['ssl_issues'] ?? 0))) . '</strong></div>';
+    echo '<div class="uptime-monitor-overview-card"><span class="uptime-monitor-overview-card-label">Email Issues</span><strong class="uptime-monitor-overview-card-value">' . esc_html(number_format_i18n((int) ($summary['mail_issues'] ?? 0))) . '</strong></div>';
+    echo '<div class="uptime-monitor-overview-card"><span class="uptime-monitor-overview-card-label">Sites Without Account Match</span><strong class="uptime-monitor-overview-card-value">' . esc_html(number_format_i18n((int) ($summary['unmatched_account'] ?? 0))) . '</strong></div>';
+    echo '</div>';
+
+    uptime_monitor_render_diagnostics_server_panels($bundle);
+
+    echo '<h2>Site Diagnostics</h2>';
     echo '<table class="widefat striped uptime-monitor-diagnostics-table">';
-    echo '<thead><tr><th>Site</th><th>Uptime</th><th>Hosting Info</th><th>SSL Certificate</th><th>Email Readiness</th><th>Checked</th></tr></thead>';
+    echo '<thead><tr><th>Site</th><th>Uptime</th><th>Hosting Info</th><th>SSL Certificate</th><th>Email Delivery</th><th>Checked</th></tr></thead>';
     echo '<tbody>';
 
     foreach ($rows as $row) {
-        $site_url = $row['site_url'];
-        $diagnostics = $row['diagnostics'];
-        $result = $row['result'];
+        $site_url = isset($row['site_url']) ? (string) $row['site_url'] : '';
+        $diagnostics = isset($row['diagnostics']) && is_array($row['diagnostics']) ? $row['diagnostics'] : [];
+        $result = isset($row['result']) && is_array($row['result']) ? $row['result'] : [];
         $account = isset($diagnostics['account']) && is_array($diagnostics['account']) ? $diagnostics['account'] : [];
+        $account = uptime_monitor_resolve_account_from_bundle($bundle, $account);
         $account_source = isset($diagnostics['account_source']) ? (string) $diagnostics['account_source'] : '';
         $account_evidence = isset($diagnostics['account_evidence']) ? (string) $diagnostics['account_evidence'] : '';
         $account_source_note = uptime_monitor_format_account_match_source($account_source, $account_evidence);
         $ipv4 = isset($diagnostics['ipv4']) && is_array($diagnostics['ipv4']) ? $diagnostics['ipv4'] : [];
         $ssl = isset($diagnostics['ssl']) && is_array($diagnostics['ssl']) ? $diagnostics['ssl'] : [];
         $mail = isset($diagnostics['mail']) && is_array($diagnostics['mail']) ? $diagnostics['mail'] : [];
+        $php = isset($diagnostics['php']) && is_array($diagnostics['php']) ? $diagnostics['php'] : [];
         $status = isset($result['status']) ? (string) $result['status'] : 'N/A';
         $site_title = isset($result['site_title']) ? (string) $result['site_title'] : '';
-        $checked_text = $row['last_checked'] > 0 ? date_i18n('m/d H:i', $row['last_checked']) : 'N/A';
+        if ($site_title === '' || $site_title === 'N/A') {
+            $site_title = isset($row['site_name']) ? (string) $row['site_name'] : '';
+        }
+        $checked_text = !empty($row['last_checked']) ? date_i18n('m/d H:i', (int) $row['last_checked']) : 'N/A';
         $diag_checked_text = !empty($diagnostics['checked_at']) ? date_i18n('m/d H:i', (int) $diagnostics['checked_at']) : 'N/A';
 
         echo '<tr>';
 
         echo '<td class="uptime-monitor-diagnostics-site">';
-        echo '<a href="' . esc_url($site_url) . '" target="_blank">' . esc_html($site_url) . '</a>';
+        echo '<a href="' . esc_url($site_url) . '" target="_blank" rel="noopener noreferrer">' . esc_html($site_url) . '</a>';
         echo '<div class="uptime-monitor-diagnostics-meta">';
         if ($site_title !== '' && $site_title !== 'N/A') {
             echo '<span>' . esc_html($site_title) . '</span>';
         }
         if (!empty($row['tags'])) {
-            echo '<span>' . esc_html($row['tags']) . '</span>';
+            echo '<span>' . esc_html((string) $row['tags']) . '</span>';
         }
         echo '</div>';
         echo '</td>';
 
         echo '<td>';
-        echo uptime_monitor_render_diagnostic_badge($row['is_down'] ? 'error' : 'ok', $row['is_down'] ? 'Down' : 'Healthy');
+        echo uptime_monitor_render_diagnostic_badge(!empty($row['is_down']) ? 'error' : 'ok', !empty($row['is_down']) ? 'Down' : 'Healthy');
         echo '<div class="uptime-monitor-diagnostics-meta"><span>' . esc_html($status) . '</span><span>Last uptime check: ' . esc_html($checked_text) . '</span></div>';
         echo '</td>';
 
@@ -5739,12 +7201,37 @@ function uptime_monitor_diagnostics_page() {
             if (isset($account['suspended']) && $account['suspended'] === 'Yes') {
                 echo '<span>Suspended in WHM</span>';
             }
-            echo '<span>Disk: ' . esc_html(uptime_monitor_format_mb($account['disk_used_mb'] ?? 0)) . '</span>';
+            if (!empty($account['package'])) {
+                echo '<span>Package: ' . esc_html((string) $account['package']) . '</span>';
+            }
+            if (!empty($php['summary'])) {
+                echo '<span>PHP: ' . esc_html((string) $php['summary']) . '</span>';
+            } elseif (!empty($account['php_version_summary'])) {
+                $php_summary = (string) $account['php_version_summary'];
+                if (!empty($account['php_fpm_summary']) && $account['php_fpm_summary'] !== 'Unknown') {
+                    $php_summary .= ' | FPM ' . strtolower((string) $account['php_fpm_summary']);
+                }
+                echo '<span>PHP: ' . esc_html($php_summary) . '</span>';
+            }
+            echo '<span>' . esc_html(uptime_monitor_format_disk_quota_summary($account['disk_used_mb'] ?? 0, $account['disk_limit_mb'] ?? null)) . '</span>';
             if (isset($account['bandwidth_used_mb']) && $account['bandwidth_used_mb'] !== null) {
                 echo '<span>' . esc_html(uptime_monitor_format_bandwidth_summary($account['bandwidth_used_mb'], $account['bandwidth_limit_mb'] ?? null)) . '</span>';
             }
             if (isset($account['inodes_used']) && $account['inodes_used'] !== null) {
                 echo '<span>' . esc_html(uptime_monitor_format_inode_summary($account['inodes_used'], $account['inodes_limit'] ?? null)) . '</span>';
+            }
+            if (array_key_exists('backup_metadata_available', $account)) {
+                echo '<span>Backups: ' . esc_html(!empty($account['backup_metadata_available']) ? 'Metadata available' : 'Metadata not visible') . '</span>';
+            }
+            if (isset($account['database_count']) && $account['database_count'] !== null) {
+                $db_text = number_format_i18n((int) $account['database_count']) . ' DB';
+                if ((int) $account['database_count'] !== 1) {
+                    $db_text .= 's';
+                }
+                if (isset($account['database_user_count']) && $account['database_user_count'] !== null) {
+                    $db_text .= ' / ' . number_format_i18n((int) $account['database_user_count']) . ' user' . ((int) $account['database_user_count'] === 1 ? '' : 's');
+                }
+                echo '<span>Databases: ' . esc_html($db_text) . '</span>';
             }
             echo '</div>';
         } elseif (!empty($ipv4['primary_ip'])) {
@@ -5766,11 +7253,15 @@ function uptime_monitor_diagnostics_page() {
         echo '<td>';
         echo uptime_monitor_render_diagnostic_badge($ssl['level'] ?? 'unknown', $ssl['summary'] ?? 'Unknown');
         echo '<div class="uptime-monitor-diagnostics-meta">';
+        echo '<span>Source: ' . esc_html(($ssl['source'] ?? '') === 'whm' ? 'WHM inventory' : 'Live TLS') . '</span>';
         if (!empty($ssl['issuer'])) {
-            echo '<span>Issuer: ' . esc_html((string) $ssl['issuer']) . '</span>';
+            echo '<span>Issuer: ' . esc_html(trim(preg_replace('/\s+/', ' ', (string) $ssl['issuer']))) . '</span>';
         }
         if (!empty($ssl['valid_to']) && is_numeric($ssl['valid_to'])) {
             echo '<span>Valid until: ' . esc_html(date_i18n('Y-m-d', (int) $ssl['valid_to'])) . '</span>';
+        }
+        if (!empty($ssl['names']) && is_array($ssl['names'])) {
+            echo '<span>Covers: ' . esc_html(implode(', ', array_slice($ssl['names'], 0, 3))) . '</span>';
         }
         echo '</div>';
         echo '</td>';
@@ -5779,10 +7270,23 @@ function uptime_monitor_diagnostics_page() {
         echo uptime_monitor_render_diagnostic_badge($mail['level'] ?? 'unknown', $mail['summary'] ?? 'Unknown');
         echo '<div class="uptime-monitor-diagnostics-meta">';
         if (!empty($mail['domain'])) {
-            echo '<span>Checked: ' . esc_html((string) $mail['domain']) . '</span>';
+            echo '<span>Checked domain: ' . esc_html((string) $mail['domain']) . '</span>';
         }
-        if (!empty($mail['mx_hosts']) && is_array($mail['mx_hosts'])) {
-            echo '<span>MX: ' . esc_html(implode(', ', array_slice($mail['mx_hosts'], 0, 2))) . '</span>';
+        if (!empty($mail['dns_summary'])) {
+            echo '<span>DNS: ' . esc_html((string) $mail['dns_summary']) . '</span>';
+        }
+        if (!empty($mail['delivery']['match_source']) && !empty($mail['delivery']['match_key'])) {
+            $source_label = ($mail['delivery']['match_source'] === 'domain') ? 'Track Email domain' : 'Track Email account';
+            echo '<span>' . esc_html($source_label . ': ' . $mail['delivery']['match_key']) . '</span>';
+        }
+        if (!empty($mail['delivery']['last_time']) && is_numeric($mail['delivery']['last_time'])) {
+            echo '<span>Latest event: ' . esc_html(date_i18n('m/d H:i', (int) $mail['delivery']['last_time'])) . '</span>';
+        }
+        if (!empty($mail['delivery']['messages'][0])) {
+            echo '<span>Latest issue: ' . esc_html(uptime_monitor_compact_label((string) $mail['delivery']['messages'][0], 72)) . '</span>';
+        }
+        if (!empty($mail['warning'])) {
+            echo '<span>' . esc_html((string) $mail['warning']) . '</span>';
         }
         echo '</div>';
         echo '</td>';
@@ -5797,6 +7301,138 @@ function uptime_monitor_diagnostics_page() {
 
     echo '</tbody>';
     echo '</table>';
+}
+
+function uptime_monitor_get_diagnostics_results_html($report) {
+    ob_start();
+    uptime_monitor_render_diagnostics_results($report);
+    return (string) ob_get_clean();
+}
+
+function uptime_monitor_ajax_process_diagnostics_batch() {
+    if (!current_user_can('manage_options')) {
+        wp_send_json_error(['message' => 'You do not have permission to view this report.'], 403);
+    }
+
+    check_ajax_referer('uptime_monitor_diagnostics_batches', 'nonce');
+
+    $request_refresh = isset($_POST['refresh']) && wp_unslash($_POST['refresh']) === '1';
+    $job_id = isset($_POST['job_id']) ? sanitize_key(wp_unslash($_POST['job_id'])) : '';
+
+    try {
+        if ($job_id === '') {
+            $job_id = md5(wp_generate_uuid4() . '|' . microtime(true) . '|' . wp_rand());
+            $state = uptime_monitor_initialize_diagnostics_job_state($request_refresh);
+        } else {
+            $state = get_transient(uptime_monitor_get_diagnostics_job_key($job_id));
+            if (!is_array($state)) {
+                wp_send_json_error(['message' => 'The diagnostics batch state expired. Reload the page and try again.'], 410);
+            }
+        }
+
+        $total_sites = isset($state['sites_total']) ? (int) $state['sites_total'] : 0;
+        $site_batch = array_slice(
+            isset($state['site_urls']) ? (array) $state['site_urls'] : [],
+            (int) ($state['offset'] ?? 0),
+            uptime_monitor_get_diagnostics_batch_size(!empty($state['force_refresh']))
+        );
+        uptime_monitor_process_diagnostics_site_batch($state, $site_batch);
+        uptime_monitor_process_diagnostics_database_batch($state);
+
+        $processed_sites = min((int) ($state['offset'] ?? 0), $total_sites);
+        $db_total = isset($state['db_total']) ? (int) $state['db_total'] : 0;
+        $processed_db = min((int) ($state['db_offset'] ?? 0), $db_total);
+        $total_steps = max(1, $total_sites + $db_total);
+        $processed_steps = $processed_sites + $processed_db;
+        $progress_pct = (int) round(($processed_steps / $total_steps) * 100);
+
+        $counts_parts = [];
+        $counts_parts[] = 'Sites: ' . number_format_i18n($processed_sites) . ' / ' . number_format_i18n($total_sites);
+        if ($db_total > 0) {
+            $counts_parts[] = 'DB accounts: ' . number_format_i18n($processed_db) . ' / ' . number_format_i18n($db_total);
+        }
+        $counts_text = implode(' | ', $counts_parts);
+        $status_text = !empty($state['force_refresh'])
+            ? 'Refreshing diagnostics in batches...'
+            : 'Loading diagnostics in batches...';
+
+        if ($processed_sites >= $total_sites && $processed_db >= $db_total) {
+            $report = uptime_monitor_finalize_diagnostics_job_state($state);
+            delete_transient(uptime_monitor_get_diagnostics_job_key($job_id));
+
+            wp_send_json_success([
+                'done'          => true,
+                'job_id'        => $job_id,
+                'progress_pct'  => 100,
+                'status_text'   => !empty($state['force_refresh']) ? 'Diagnostics refresh complete.' : 'Diagnostics ready.',
+                'counts_text'   => $counts_text,
+                'html'          => uptime_monitor_get_diagnostics_results_html($report),
+                'is_refresh'    => !empty($state['force_refresh']),
+            ]);
+        }
+
+        set_transient(uptime_monitor_get_diagnostics_job_key($job_id), $state, HOUR_IN_SECONDS);
+
+        wp_send_json_success([
+            'done'          => false,
+            'job_id'        => $job_id,
+            'progress_pct'  => $progress_pct,
+            'status_text'   => $status_text,
+            'counts_text'   => $counts_text,
+            'is_refresh'    => !empty($state['force_refresh']),
+        ]);
+    } catch (Throwable $throwable) {
+        if ($job_id !== '') {
+            delete_transient(uptime_monitor_get_diagnostics_job_key($job_id));
+        }
+
+        $message = uptime_monitor_clean_plugin_text($throwable->getMessage());
+        if ($message === '') {
+            $message = 'Unexpected server error while building diagnostics.';
+        }
+
+        wp_send_json_error(['message' => $message], 500);
+    }
+}
+add_action('wp_ajax_uptime_monitor_process_diagnostics_batch', 'uptime_monitor_ajax_process_diagnostics_batch');
+
+function uptime_monitor_diagnostics_page() {
+    if (!current_user_can('manage_options')) {
+        return;
+    }
+
+    $force_refresh = false;
+    if (isset($_POST['refresh_site_diagnostics'])) {
+        check_admin_referer('uptime_monitor_refresh_site_diagnostics', 'uptime_monitor_refresh_site_diagnostics_nonce');
+        $force_refresh = true;
+    }
+
+    $progress_nonce = wp_create_nonce('uptime_monitor_diagnostics_batches');
+
+    echo '<div class="wrap">';
+    echo '<h1>Site Diagnostics</h1>';
+    echo '<p class="uptime-monitor-plugin-report-intro">This view batches together WHM account matching, SSL inventory, recent Track Email failures, PHP/package/quota visibility, backup visibility, mail queue health, and database inventory. When a site cannot be tied to a WHM account confidently, the diagnostics table falls back to the site&apos;s IPv4 record.</p>';
+
+    echo '<div class="uptime-monitor-report-actions">';
+    echo '<form method="post" action="' . esc_url(admin_url('admin.php?page=uptime-monitor-diagnostics')) . '" class="uptime-monitor-report-refresh-form">';
+    wp_nonce_field('uptime_monitor_refresh_site_diagnostics', 'uptime_monitor_refresh_site_diagnostics_nonce');
+    echo '<button type="submit" name="refresh_site_diagnostics" class="button button-primary" data-diagnostics-refresh-button="1">Refresh Diagnostics</button>';
+    echo '</form>';
+    echo '<a href="' . esc_url(admin_url('admin.php?page=uptime-monitor')) . '" class="button button-secondary">Back to Uptime Monitor</a>';
+    echo '</div>';
+
+    echo '<div class="uptime-monitor-plugin-report-progress" data-diagnostics-loader="1" data-refresh="' . esc_attr($force_refresh ? '1' : '0') . '" data-ajax-url="' . esc_url(admin_url('admin-ajax.php')) . '" data-nonce="' . esc_attr($progress_nonce) . '">';
+    echo '<div class="uptime-monitor-plugin-report-progress-bar"><span class="uptime-monitor-plugin-report-progress-fill" data-diagnostics-progress-fill></span></div>';
+    echo '<div class="uptime-monitor-plugin-report-progress-meta">';
+    echo '<strong data-diagnostics-progress-percent>0%</strong> ';
+    echo '<span data-diagnostics-progress-status>' . esc_html($force_refresh ? 'Refreshing diagnostics...' : 'Loading diagnostics...') . '</span>';
+    echo '</div>';
+    echo '<div class="uptime-monitor-inline-note" data-diagnostics-progress-counts>Preparing batched diagnostics work...</div>';
+    echo '<div class="uptime-monitor-plugin-report-error is-hidden" data-diagnostics-error></div>';
+    echo '</div>';
+
+    echo '<div data-diagnostics-results></div>';
+    echo '<noscript><p>The diagnostics view requires JavaScript so it can load in batches.</p></noscript>';
     echo '</div>';
 }
 
@@ -5964,6 +7600,24 @@ function uptime_monitor_enqueue_styles() {
         }
         .uptime-monitor-diagnostics-site a {
             font-weight: 600;
+        }
+        .uptime-monitor-diagnostics-panel-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 10px;
+            margin: 10px 0 18px;
+        }
+        .uptime-monitor-diagnostics-panel {
+            padding: 12px 14px;
+            border: 1px solid #dcdcde;
+            border-radius: 12px;
+            background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+        }
+        .uptime-monitor-diagnostics-panel-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
         }
         .uptime-monitor-disk-summary {
             margin: 8px 0 10px;
@@ -7215,13 +8869,166 @@ function uptime_monitor_enqueue_plugin_report_batch_script() {
 }
 add_action('admin_footer', 'uptime_monitor_enqueue_plugin_report_batch_script');
 
+function uptime_monitor_enqueue_diagnostics_batch_script() {
+    if (uptime_monitor_get_current_admin_page() !== 'uptime-monitor-diagnostics') {
+        return;
+    }
+
+    echo '<script>
+    (function() {
+        var loader = document.querySelector("[data-diagnostics-loader=\"1\"]");
+        var resultsNode = document.querySelector("[data-diagnostics-results]");
+        if (!loader || !resultsNode) {
+            return;
+        }
+
+        var ajaxUrl = loader.getAttribute("data-ajax-url") || "";
+        var nonce = loader.getAttribute("data-nonce") || "";
+        var refreshMode = loader.getAttribute("data-refresh") === "1";
+        var fillNode = loader.querySelector("[data-diagnostics-progress-fill]");
+        var percentNode = loader.querySelector("[data-diagnostics-progress-percent]");
+        var statusNode = loader.querySelector("[data-diagnostics-progress-status]");
+        var countsNode = loader.querySelector("[data-diagnostics-progress-counts]");
+        var errorNode = loader.querySelector("[data-diagnostics-error]");
+        var refreshButton = document.querySelector("[data-diagnostics-refresh-button=\"1\"]");
+        var jobId = "";
+        var active = false;
+
+        if (!ajaxUrl || !nonce || !fillNode || !percentNode || !statusNode || !countsNode || !errorNode) {
+            return;
+        }
+
+        var setRefreshDisabled = function(disabled) {
+            if (refreshButton) {
+                refreshButton.disabled = !!disabled;
+            }
+        };
+
+        var setProgress = function(progressPct, statusText, countsText) {
+            var safePct = parseInt(progressPct, 10);
+            if (!Number.isFinite(safePct)) {
+                safePct = 0;
+            }
+
+            safePct = Math.max(0, Math.min(100, safePct));
+            fillNode.style.width = safePct + "%";
+            percentNode.textContent = safePct + "%";
+
+            if (statusText) {
+                statusNode.textContent = statusText;
+            }
+            if (typeof countsText === "string" && countsText !== "") {
+                countsNode.textContent = countsText;
+            }
+        };
+
+        var clearError = function() {
+            loader.classList.remove("is-error");
+            errorNode.textContent = "";
+            errorNode.classList.add("is-hidden");
+        };
+
+        var showError = function(message) {
+            active = false;
+            loader.classList.remove("is-loading");
+            loader.classList.remove("is-complete");
+            loader.classList.add("is-error");
+            errorNode.textContent = message || "Unable to load diagnostics.";
+            errorNode.classList.remove("is-hidden");
+            resultsNode.innerHTML = "";
+            setRefreshDisabled(false);
+        };
+
+        var parseResponse = function(response) {
+            return response.text().then(function(text) {
+                var payload = null;
+                if (text) {
+                    try {
+                        payload = JSON.parse(text);
+                    } catch (error) {
+                        payload = null;
+                    }
+                }
+
+                if (!response.ok) {
+                    var errorMessage = payload && payload.data && payload.data.message ? payload.data.message : "The server returned an invalid diagnostics response.";
+                    throw new Error(errorMessage);
+                }
+
+                if (!payload) {
+                    throw new Error("The server returned an empty diagnostics response.");
+                }
+
+                return payload;
+            });
+        };
+
+        var requestNextBatch = function() {
+            if (active) {
+                return;
+            }
+
+            active = true;
+            loader.classList.add("is-loading");
+            loader.classList.remove("is-complete");
+            clearError();
+            setRefreshDisabled(true);
+
+            var formData = new URLSearchParams();
+            formData.append("action", "uptime_monitor_process_diagnostics_batch");
+            formData.append("nonce", nonce);
+            formData.append("refresh", refreshMode ? "1" : "0");
+
+            if (jobId) {
+                formData.append("job_id", jobId);
+            }
+
+            fetch(ajaxUrl, {
+                method: "POST",
+                credentials: "same-origin",
+                headers: {
+                    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"
+                },
+                body: formData.toString()
+            }).then(parseResponse).then(function(payload) {
+                if (!payload || !payload.success || !payload.data) {
+                    var message = payload && payload.data && payload.data.message ? payload.data.message : "Unable to load diagnostics.";
+                    throw new Error(message);
+                }
+
+                var data = payload.data;
+                jobId = data.job_id || jobId;
+                setProgress(data.progress_pct, data.status_text, data.counts_text);
+
+                if (data.done) {
+                    loader.classList.remove("is-loading");
+                    loader.classList.add("is-complete");
+                    resultsNode.innerHTML = data.html || "";
+                    setRefreshDisabled(false);
+                    active = false;
+                    return;
+                }
+
+                active = false;
+                window.setTimeout(requestNextBatch, 30);
+            }).catch(function(error) {
+                showError(error && error.message ? error.message : "Unable to load diagnostics.");
+            });
+        };
+
+        requestNextBatch();
+    })();
+    </script>';
+}
+add_action('admin_footer', 'uptime_monitor_enqueue_diagnostics_batch_script');
+
 function uptime_monitor_get_mainwp_sites($get_tags = false) {
     global $wpdb;
 
     $mainwp_sites = [];
 
     $table_name = $wpdb->prefix . 'mainwp_wp';
-    $query = "SELECT id, url FROM $table_name";
+    $query = "SELECT id, url, name FROM $table_name";
 
     if (!$get_tags) {
         $results = $wpdb->get_results($query);
@@ -7263,7 +9070,9 @@ function uptime_monitor_get_mainwp_sites($get_tags = false) {
         $site_url = $site->url;
         $tags     = isset($site_tags[$site_id]) ? implode(', ', $site_tags[$site_id]) : '';
         $mainwp_sites[$site_url] = [
+            'site_id'  => (int) $site_id,
             'site_url' => $site_url,
+            'name'     => isset($site->name) ? sanitize_text_field($site->name) : '',
             'tags'     => $tags,
         ];
     }
