@@ -3,7 +3,7 @@
 Plugin Name: Uptime Monitor
 Plugin URI: https://github.com/stronganchor/uptime-monitor/
 Description: A plugin to monitor URLs and report their HTTP status and display server stats.
-Version: 1.1.21
+Version: 1.1.22
 Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
 */
@@ -2757,6 +2757,15 @@ function uptime_monitor_format_service_name($service_name) {
     return ucwords(str_replace(['_', '-'], ' ', $service_name));
 }
 
+function uptime_monitor_should_hide_service($service_name) {
+    $service_key = sanitize_key((string) $service_name);
+    if ($service_key === '') {
+        return false;
+    }
+
+    return strpos($service_key, 'mailman') !== false;
+}
+
 function uptime_monitor_get_whm_service_status($whm_user, $whm_api_token, $server_url) {
     $response = uptime_monitor_whm_api_request($whm_user, $whm_api_token, $server_url, 'json-api/servicestatus?api.version=1&full=1');
     if (empty($response['ok'])) {
@@ -2786,6 +2795,13 @@ function uptime_monitor_get_whm_service_status($whm_user, $whm_api_token, $serve
 
         $service_key = sanitize_key($name);
         if ($service_key === '') {
+            continue;
+        }
+        if (
+            uptime_monitor_should_hide_service($service_key)
+            || uptime_monitor_should_hide_service($row['display_name'] ?? '')
+            || uptime_monitor_should_hide_service($row['label'] ?? '')
+        ) {
             continue;
         }
 
@@ -4736,11 +4752,6 @@ function uptime_monitor_render_server_stats($stats) {
         echo '<div class="uptime-monitor-overview-card">';
         echo '<span class="uptime-monitor-overview-card-label">WHM Version</span>';
         echo '<strong class="uptime-monitor-overview-card-value">' . esc_html($version !== '' ? $version : 'Unavailable') . '</strong>';
-        echo '</div>';
-
-        echo '<div class="uptime-monitor-overview-card">';
-        echo '<span class="uptime-monitor-overview-card-label">Visible Accounts</span>';
-        echo '<strong class="uptime-monitor-overview-card-value">' . esc_html(number_format(count($stats['accounts'] ?? []))) . '</strong>';
         echo '</div>';
 
         echo '<div class="uptime-monitor-overview-card uptime-monitor-overview-card-services" tabindex="0">';
