@@ -3,7 +3,7 @@
 Plugin Name: Uptime Monitor
 Plugin URI: https://github.com/stronganchor/uptime-monitor/
 Description: A plugin to monitor URLs and report their HTTP status and display server stats.
-Version: 1.1.28
+Version: 1.1.29
 Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
 */
@@ -1770,6 +1770,23 @@ function uptime_monitor_get_off_directory_plugin_report_variant_files($plugin_fi
     return $variant_files;
 }
 
+function uptime_monitor_get_plugin_report_manual_review_items() {
+    return [
+        [
+            'name'        => 'Uptime Monitor',
+            'plugin_file' => 'uptime-monitor/uptime-monitor.php',
+            'candidate'   => 'uptime-monitor',
+            'note'        => 'Used on the MainWP dashboard itself, so it does not appear in MainWP child-site plugin inventories or this plugin report.',
+        ],
+        [
+            'name'        => 'Stripe Payments Monitor',
+            'plugin_file' => 'stripe-payments-monitor/stripe-payments-monitor.php',
+            'candidate'   => 'stripe-payments-monitor',
+            'note'        => 'Used on the MainWP dashboard itself, so it does not appear in MainWP child-site plugin inventories or this plugin report.',
+        ],
+    ];
+}
+
 function uptime_monitor_get_off_directory_plugin_report_markdown($report) {
     $partitions = uptime_monitor_get_off_directory_plugin_report_partitions($report);
     $visible_items = $partitions['visible_items'];
@@ -1779,6 +1796,7 @@ function uptime_monitor_get_off_directory_plugin_report_markdown($report) {
     $hidden_total = $partitions['hidden_total'];
     $date_time_format = $partitions['date_time_format'];
     $notes = uptime_monitor_get_plugin_report_notes();
+    $manual_review_items = uptime_monitor_get_plugin_report_manual_review_items();
 
     $lines = [];
     $lines[] = '# Off-Directory Plugin Report';
@@ -1810,6 +1828,22 @@ function uptime_monitor_get_off_directory_plugin_report_markdown($report) {
         $lines[] = '## Warnings';
         foreach ($warning_lines as $warning_line) {
             $lines[] = '- ' . $warning_line;
+        }
+    }
+
+    if (!empty($manual_review_items)) {
+        $lines[] = '';
+        $lines[] = '## MainWP Dashboard Plugins To Review';
+        foreach ($manual_review_items as $item) {
+            $lines[] = '';
+            $lines[] = '### ' . (string) $item['name'];
+            $lines[] = '- Plugin file: `' . (string) $item['plugin_file'] . '`';
+            if (!empty($item['candidate'])) {
+                $lines[] = '- Canonical slug: `' . (string) $item['candidate'] . '`';
+            }
+            if (!empty($item['note'])) {
+                $lines[] = '- Notes: ' . (string) $item['note'];
+            }
         }
     }
 
@@ -1974,6 +2008,7 @@ function uptime_monitor_render_off_directory_plugin_report_results($report) {
     $hidden_total = $partitions['hidden_total'];
     $date_time_format = $partitions['date_time_format'];
     $notes = uptime_monitor_get_plugin_report_notes();
+    $manual_review_items = uptime_monitor_get_plugin_report_manual_review_items();
     $report_action_url = admin_url('admin-post.php');
 
     if (!empty($report['error'])) {
@@ -2010,6 +2045,32 @@ function uptime_monitor_render_off_directory_plugin_report_results($report) {
 
     if (!empty($report['stronganchor_lookup_error'])) {
         echo '<p class="uptime-monitor-plugin-report-warning">Strong Anchor GitHub matching is currently unavailable: ' . esc_html($report['stronganchor_lookup_error']) . '.</p>';
+    }
+
+    if (!empty($manual_review_items)) {
+        echo '<h2>MainWP Dashboard Plugins To Review</h2>';
+        echo '<p class="uptime-monitor-plugin-report-intro">These plugins run on the MainWP dashboard itself, so they do not appear in child-site plugin inventories. Include them when doing security reviews.</p>';
+        echo '<table class="widefat striped uptime-monitor-plugin-report-table">';
+        echo '<thead><tr><th class="uptime-monitor-report-plugin-cell">Plugin</th><th class="uptime-monitor-report-details-cell">Notes</th></tr></thead>';
+        echo '<tbody>';
+
+        foreach ($manual_review_items as $item) {
+            echo '<tr>';
+            echo '<td class="uptime-monitor-report-plugin-cell">';
+            echo '<strong>' . esc_html($item['name']) . '</strong>';
+            echo '<div class="uptime-monitor-inline-note"><code>' . esc_html($item['plugin_file']) . '</code></div>';
+            if (!empty($item['candidate'])) {
+                echo '<div class="uptime-monitor-inline-note">Canonical slug: <code>' . esc_html($item['candidate']) . '</code></div>';
+            }
+            echo '</td>';
+            echo '<td class="uptime-monitor-report-details-cell">';
+            echo esc_html($item['note']);
+            echo '</td>';
+            echo '</tr>';
+        }
+
+        echo '</tbody>';
+        echo '</table>';
     }
 
     if (!empty($visible_items)) {
