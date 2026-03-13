@@ -3,7 +3,7 @@
 Plugin Name: Uptime Monitor
 Plugin URI: https://github.com/stronganchor/uptime-monitor/
 Description: A plugin to monitor URLs and report their HTTP status and display server stats.
-Version: 1.1.17
+Version: 1.1.18
 Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
 */
