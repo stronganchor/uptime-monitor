@@ -3,7 +3,7 @@
 Plugin Name: Uptime Monitor
 Plugin URI: https://github.com/stronganchor/uptime-monitor/
 Description: A plugin to monitor URLs and report their HTTP status and display server stats.
-Version: 1.1.18
+Version: 1.1.19
 Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
 */
@@ -2966,45 +2966,197 @@ function uptime_monitor_domain_ends_with($value, $suffix) {
     return substr($value, -strlen($suffix)) === $suffix;
 }
 
-function uptime_monitor_find_account_for_site_host($site_host, $accounts) {
+function uptime_monitor_normalize_certificate_lookup_key($value) {
+    $value = uptime_monitor_normalize_lookup_key($value);
+    if ($value === '') {
+        return '';
+    }
+
+    return preg_replace('/^\*\./', '', $value);
+}
+
+function uptime_monitor_get_account_match_candidate($site_host, $account, $ssl_names = []) {
+    $site_host = uptime_monitor_normalize_lookup_key($site_host);
+    if ($site_host === '' || !is_array($account)) {
+        return [
+            'account'  => [],
+            'score'    => -1,
+            'source'   => '',
+            'evidence' => '',
+        ];
+    }
+
+    $account_domain = uptime_monitor_normalize_lookup_key($account['domain'] ?? '');
+    if ($account_domain === '') {
+        return [
+            'account'  => [],
+            'score'    => -1,
+            'source'   => '',
+            'evidence' => '',
+        ];
+    }
+
+    $best = [
+        'account'  => [],
+        'score'    => -1,
+        'source'   => '',
+        'evidence' => '',
+    ];
+
+    if ($site_host === $account_domain) {
+        return [
+            'account'  => $account,
+            'score'    => 1000 + strlen($account_domain),
+            'source'   => 'account_domain_exact',
+            'evidence' => $account_domain,
+        ];
+    }
+
+    if (uptime_monitor_domain_ends_with($site_host, $account_domain)) {
+        $best = [
+            'account'  => $account,
+            'score'    => 900 + strlen($account_domain),
+            'source'   => 'account_domain_parent',
+            'evidence' => $account_domain,
+        ];
+    } elseif (uptime_monitor_domain_ends_with($account_domain, $site_host)) {
+        $best = [
+            'account'  => $account,
+            'score'    => 400 + strlen($account_domain),
+            'source'   => 'account_domain_child',
+            'evidence' => $account_domain,
+        ];
+    }
+
+    if (!is_array($ssl_names) || empty($ssl_names)) {
+        return $best;
+    }
+
+    $normalized_site_aliases = [$site_host];
+    if (strpos($site_host, 'www.') !== 0) {
+        $normalized_site_aliases[] = 'www.' . $site_host;
+    }
+    $normalized_site_aliases = array_values(array_unique(array_filter($normalized_site_aliases, 'strlen')));
+
+    foreach ($ssl_names as $ssl_name_raw) {
+        $ssl_name = uptime_monitor_normalize_certificate_lookup_key($ssl_name_raw);
+        if ($ssl_name === '') {
+            continue;
+        }
+
+        if ($ssl_name === $account_domain && $best['score'] < (500 + strlen($account_domain))) {
+            $best = [
+                'account'  => $account,
+                'score'    => 500 + strlen($account_domain),
+                'source'   => 'ssl_account_domain',
+                'evidence' => $ssl_name,
+            ];
+        }
+
+        $suffix = '.' . $account_domain;
+        if (strlen($ssl_name) <= strlen($suffix) || substr($ssl_name, -strlen($suffix)) !== $suffix) {
+            continue;
+        }
+
+        $alias_prefix = trim(substr($ssl_name, 0, -strlen($suffix)), '.');
+        $alias_prefix = uptime_monitor_normalize_certificate_lookup_key($alias_prefix);
+        if ($alias_prefix === '') {
+            continue;
+        }
+
+        foreach ($normalized_site_aliases as $site_alias) {
+            if ($alias_prefix === $site_alias) {
+                $candidate = [
+                    'account'  => $account,
+                    'score'    => 850 + strlen($account_domain),
+                    'source'   => 'ssl_alias_exact',
+                    'evidence' => $ssl_name,
+                ];
+                if ($candidate['score'] > $best['score']) {
+                    $best = $candidate;
+                }
+                continue;
+            }
+
+            if (uptime_monitor_domain_ends_with($alias_prefix, $site_alias) || uptime_monitor_domain_ends_with($site_alias, $alias_prefix)) {
+                $candidate = [
+                    'account'  => $account,
+                    'score'    => 780 + strlen($account_domain),
+                    'source'   => 'ssl_alias_related',
+                    'evidence' => $ssl_name,
+                ];
+                if ($candidate['score'] > $best['score']) {
+                    $best = $candidate;
+                }
+            }
+        }
+    }
+
+    return $best;
+}
+
+function uptime_monitor_find_account_for_site_host($site_host, $accounts, $ssl_names = []) {
     if (!is_array($accounts)) {
-        return [];
+        return [
+            'account'  => [],
+            'source'   => '',
+            'evidence' => '',
+        ];
     }
 
     $site_host = uptime_monitor_normalize_lookup_key($site_host);
     if ($site_host === '') {
-        return [];
+        return [
+            'account'  => [],
+            'source'   => '',
+            'evidence' => '',
+        ];
     }
 
-    $best_match = [];
-    $best_score = -1;
+    $best_match = [
+        'account'  => [],
+        'score'    => -1,
+        'source'   => '',
+        'evidence' => '',
+    ];
 
     foreach ($accounts as $account) {
-        if (!is_array($account)) {
-            continue;
-        }
-
-        $account_domain = uptime_monitor_normalize_lookup_key($account['domain'] ?? '');
-        if ($account_domain === '') {
-            continue;
-        }
-
-        $score = -1;
-        if ($site_host === $account_domain) {
-            $score = 300 + strlen($account_domain);
-        } elseif (uptime_monitor_domain_ends_with($site_host, $account_domain)) {
-            $score = 200 + strlen($account_domain);
-        } elseif (uptime_monitor_domain_ends_with($account_domain, $site_host)) {
-            $score = 100 + strlen($account_domain);
-        }
-
-        if ($score > $best_score) {
-            $best_score = $score;
-            $best_match = $account;
+        $candidate = uptime_monitor_get_account_match_candidate($site_host, $account, $ssl_names);
+        if (($candidate['score'] ?? -1) > $best_match['score']) {
+            $best_match = $candidate;
         }
     }
 
+    unset($best_match['score']);
     return $best_match;
+}
+
+function uptime_monitor_format_account_match_source($source, $evidence = '') {
+    $source = sanitize_key((string) $source);
+    $evidence = trim((string) $evidence);
+
+    switch ($source) {
+        case 'account_domain_exact':
+            return 'Matched exact main domain.';
+        case 'account_domain_parent':
+            return 'Matched parent domain.';
+        case 'account_domain_child':
+            return 'Matched nested main domain.';
+        case 'ssl_account_domain':
+            return $evidence !== ''
+                ? ('Matched via SSL certificate domain `' . $evidence . '`.')
+                : 'Matched via SSL certificate domain.';
+        case 'ssl_alias_exact':
+            return $evidence !== ''
+                ? ('Matched via SSL certificate alias `' . $evidence . '`.')
+                : 'Matched via SSL certificate alias.';
+        case 'ssl_alias_related':
+            return $evidence !== ''
+                ? ('Matched via related SSL certificate alias `' . $evidence . '`.')
+                : 'Matched via related SSL certificate alias.';
+        default:
+            return '';
+    }
 }
 
 function uptime_monitor_get_site_diagnostic_level_rank($level) {
@@ -3025,7 +3177,7 @@ function uptime_monitor_merge_site_diagnostic_level($current, $candidate) {
 }
 
 function uptime_monitor_get_site_diagnostics_cache_key($site_url) {
-    return 'uptime_monitor_diag_' . md5((string) $site_url);
+    return 'uptime_monitor_diag_v2_' . md5((string) $site_url);
 }
 
 function uptime_monitor_extract_certificate_names($subject_alt_name) {
@@ -3354,15 +3506,17 @@ function uptime_monitor_get_site_diagnostics($site_url, $server_stats = [], $for
     }
 
     $site_host = uptime_monitor_normalize_lookup_key($site_url);
+    $site_scheme = strtolower((string) parse_url((string) $site_url, PHP_URL_SCHEME));
     $site_port = (int) parse_url((string) $site_url, PHP_URL_PORT);
-    if ($site_port <= 0) {
+    if ($site_scheme !== 'https' || $site_port <= 0) {
         $site_port = 443;
     }
     $accounts = isset($server_stats['accounts']) && is_array($server_stats['accounts']) ? $server_stats['accounts'] : [];
-    $account = uptime_monitor_find_account_for_site_host($site_host, $accounts);
-    $account_domain = is_array($account) ? (string) ($account['domain'] ?? '') : '';
 
     $ssl = uptime_monitor_get_site_certificate_details($site_host, $site_port);
+    $account_match = uptime_monitor_find_account_for_site_host($site_host, $accounts, $ssl['names'] ?? []);
+    $account = isset($account_match['account']) && is_array($account_match['account']) ? $account_match['account'] : [];
+    $account_domain = is_array($account) ? (string) ($account['domain'] ?? '') : '';
     $mail = uptime_monitor_get_mail_domain_probe($site_host, $account_domain);
 
     $overall_level = 'ok';
@@ -3384,6 +3538,8 @@ function uptime_monitor_get_site_diagnostics($site_url, $server_stats = [], $for
         'overall_level'    => $overall_level,
         'account'          => $account,
         'account_summary'  => $account_summary,
+        'account_source'   => isset($account_match['source']) ? (string) $account_match['source'] : '',
+        'account_evidence' => isset($account_match['evidence']) ? (string) $account_match['evidence'] : '',
         'ssl'              => $ssl,
         'mail'             => $mail,
         'checked_at'       => time(),
@@ -5320,6 +5476,9 @@ function uptime_monitor_diagnostics_page() {
         $diagnostics = $row['diagnostics'];
         $result = $row['result'];
         $account = isset($diagnostics['account']) && is_array($diagnostics['account']) ? $diagnostics['account'] : [];
+        $account_source = isset($diagnostics['account_source']) ? (string) $diagnostics['account_source'] : '';
+        $account_evidence = isset($diagnostics['account_evidence']) ? (string) $diagnostics['account_evidence'] : '';
+        $account_source_note = uptime_monitor_format_account_match_source($account_source, $account_evidence);
         $ssl = isset($diagnostics['ssl']) && is_array($diagnostics['ssl']) ? $diagnostics['ssl'] : [];
         $mail = isset($diagnostics['mail']) && is_array($diagnostics['mail']) ? $diagnostics['mail'] : [];
         $status = isset($result['status']) ? (string) $result['status'] : 'N/A';
@@ -5354,6 +5513,9 @@ function uptime_monitor_diagnostics_page() {
             echo '<div class="uptime-monitor-diagnostics-meta">';
             if (!empty($account['domain'])) {
                 echo '<span>' . esc_html((string) $account['domain']) . '</span>';
+            }
+            if ($account_source_note !== '') {
+                echo '<span>' . esc_html($account_source_note) . '</span>';
             }
             if (isset($account['suspended']) && $account['suspended'] === 'Yes') {
                 echo '<span>Suspended in WHM</span>';
