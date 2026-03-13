@@ -3,7 +3,7 @@
 Plugin Name: Uptime Monitor
 Plugin URI: https://github.com/stronganchor/uptime-monitor/
 Description: A plugin to monitor URLs and report their HTTP status and display server stats.
-Version: 1.1.27
+Version: 1.1.28
 Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
 */
@@ -3125,7 +3125,7 @@ function uptime_monitor_resolve_account_from_bundle($bundle, $account) {
 }
 
 function uptime_monitor_get_diagnostics_server_bundle_cache_key() {
-    return 'uptime_monitor_diag_server_bundle_v1';
+    return 'uptime_monitor_diag_server_bundle_v2';
 }
 
 function uptime_monitor_get_diagnostics_db_inventory_cache_key() {
@@ -3674,11 +3674,6 @@ function uptime_monitor_get_email_activity_for_site($site_host, $account, $email
             array_shift($parts);
         }
     }
-    $account_domain = uptime_monitor_normalize_lookup_key($account['domain'] ?? '');
-    if ($account_domain !== '' && !in_array($account_domain, $domain_candidates, true)) {
-        array_unshift($domain_candidates, $account_domain);
-    }
-
     $by_domain = isset($email_activity['by_domain']) && is_array($email_activity['by_domain']) ? $email_activity['by_domain'] : [];
     foreach ($domain_candidates as $domain_candidate) {
         if (isset($by_domain[$domain_candidate]) && is_array($by_domain[$domain_candidate])) {
@@ -3691,27 +3686,16 @@ function uptime_monitor_get_email_activity_for_site($site_host, $account, $email
         }
     }
 
-    $user = uptime_monitor_normalize_lookup_key($account['username'] ?? '');
-    $by_user = isset($email_activity['by_user']) && is_array($email_activity['by_user']) ? $email_activity['by_user'] : [];
-    if ($user !== '' && isset($by_user[$user]) && is_array($by_user[$user])) {
-        $match = $by_user[$user];
-        $match['match_source'] = 'account';
-        $match['match_key'] = $user;
-        $match['available'] = true;
-        $match['warning'] = $empty['warning'];
-        return $match;
-    }
-
     return $empty;
 }
 
 function uptime_monitor_merge_mail_diagnostics($dns_probe, $email_activity) {
     $mail = is_array($dns_probe) ? $dns_probe : uptime_monitor_probe_mail_dns('');
     $mail['delivery'] = $email_activity;
-    $mail['source'] = !empty($email_activity['available']) ? 'whm_track_email' : 'dns_only';
+    $mail['source'] = !empty($email_activity['match_source']) ? 'whm_track_email' : 'dns_only';
 
     $delivery_summary = '';
-    if (!empty($email_activity['available'])) {
+    if (!empty($email_activity['match_source'])) {
         if (!empty($email_activity['failure_count'])) {
             $delivery_summary = number_format_i18n((int) $email_activity['failure_count']) . ' recent failure' . ((int) $email_activity['failure_count'] === 1 ? '' : 's');
             $mail['level'] = 'error';
@@ -3724,7 +3708,7 @@ function uptime_monitor_merge_mail_diagnostics($dns_probe, $email_activity) {
                 && in_array($dns_probe['level'] ?? 'unknown', ['warning', 'error'], true)
             )
                 ? (string) $dns_probe['summary']
-                : 'No recent failures';
+                : 'No recent delivery failures';
         }
 
         $mail['summary'] = $delivery_summary;
@@ -4055,41 +4039,14 @@ function uptime_monitor_apply_diagnostics_account_enrichments(&$bundle, $db_cach
     $accounts = isset($bundle['server_stats']['accounts']) && is_array($bundle['server_stats']['accounts'])
         ? $bundle['server_stats']['accounts']
         : [];
-    $php_inventory = isset($bundle['php_inventory']) && is_array($bundle['php_inventory']) ? $bundle['php_inventory'] : [];
-    $backup_health = isset($bundle['backup_health']) && is_array($bundle['backup_health']) ? $bundle['backup_health'] : [];
-    $db_cache = is_array($db_cache) ? $db_cache : [];
-
-    $php_by_user = isset($php_inventory['by_user']) && is_array($php_inventory['by_user']) ? $php_inventory['by_user'] : [];
-    $metadata_users = isset($backup_health['metadata_users']) && is_array($backup_health['metadata_users']) ? $backup_health['metadata_users'] : [];
 
     foreach ($accounts as &$account) {
         if (!is_array($account)) {
             continue;
         }
 
-        $user = isset($account['username']) ? trim((string) $account['username']) : '';
-        $normalized_user = uptime_monitor_normalize_lookup_key($user);
         $account['package'] = uptime_monitor_get_account_package_name($account);
-        $account['backup_metadata_available'] = ($normalized_user !== '' && isset($metadata_users[$normalized_user]));
-        $account['backup_metadata_domain'] = ($normalized_user !== '' && isset($metadata_users[$normalized_user]))
-            ? (string) $metadata_users[$normalized_user]
-            : '';
-
-        if ($user !== '' && isset($php_by_user[$user]) && is_array($php_by_user[$user])) {
-            $account['php_version_summary'] = isset($php_by_user[$user]['version_summary']) ? (string) $php_by_user[$user]['version_summary'] : '';
-            $account['php_fpm_summary'] = isset($php_by_user[$user]['php_fpm_summary']) ? (string) $php_by_user[$user]['php_fpm_summary'] : '';
-        } else {
-            $account['php_version_summary'] = '';
-            $account['php_fpm_summary'] = '';
-        }
-
-        if ($user !== '' && isset($db_cache[$user]) && is_array($db_cache[$user])) {
-            $account['database_count'] = isset($db_cache[$user]['database_count']) ? (int) $db_cache[$user]['database_count'] : null;
-            $account['database_user_count'] = isset($db_cache[$user]['database_user_count']) ? (int) $db_cache[$user]['database_user_count'] : null;
-        } else {
-            $account['database_count'] = null;
-            $account['database_user_count'] = null;
-        }
+        unset($account['backup_metadata_available'], $account['backup_metadata_domain'], $account['php_version_summary'], $account['php_fpm_summary'], $account['database_count'], $account['database_user_count']);
     }
     unset($account);
 
@@ -4102,14 +4059,7 @@ function uptime_monitor_get_diagnostics_server_bundle($force_refresh = false) {
     if (!$force_refresh) {
         $cached = get_transient($cache_key);
         if (is_array($cached)) {
-            $db_cache = uptime_monitor_get_diagnostics_db_inventory_cache(false);
-            $cached['database_inventory'] = uptime_monitor_summarize_database_inventory(
-                $db_cache,
-                array_values(array_filter(array_map(function($account) {
-                    return is_array($account) && !empty($account['username']) ? (string) $account['username'] : '';
-                }, $cached['server_stats']['accounts'] ?? []), 'strlen'))
-            );
-            uptime_monitor_apply_diagnostics_account_enrichments($cached, $db_cache);
+            uptime_monitor_apply_diagnostics_account_enrichments($cached);
             return $cached;
         }
     }
@@ -4121,36 +4071,7 @@ function uptime_monitor_get_diagnostics_server_bundle($force_refresh = false) {
     $bundle = [
         'server_stats'        => get_whm_server_stats(),
         'ssl_inventory'       => [],
-        'php_inventory'       => [],
         'email_activity'      => [],
-        'mail_queue'          => [
-            'level'   => 'unknown',
-            'summary' => 'Unavailable',
-            'warning' => '',
-        ],
-        'backup_health'       => [
-            'level'          => 'unknown',
-            'summary'        => 'Unavailable',
-            'type'           => '',
-            'schedule'       => [],
-            'destinations'   => [],
-            'metadata_users' => [],
-            'warning'        => '',
-            'enabled'        => null,
-        ],
-        'database_inventory'  => [
-            'level'               => 'unknown',
-            'summary'             => 'Inventory pending',
-            'database_count'      => 0,
-            'database_user_count' => 0,
-            'covered_users'       => 0,
-            'total_users'         => 0,
-            'mysql_version'       => '',
-            'top_accounts'        => [],
-            'warning'             => '',
-            'pending_total'       => 0,
-            'pending_processed'   => 0,
-        ],
         'account_map'         => [],
         'generated_at'        => time(),
     ];
@@ -4159,31 +4080,11 @@ function uptime_monitor_get_diagnostics_server_bundle($force_refresh = false) {
         $ssl_inventory = uptime_monitor_get_whm_ssl_vhost_inventory($whm_user, $whm_api_token, $server_url);
         $bundle['ssl_inventory'] = is_array($ssl_inventory) ? $ssl_inventory : ['warning' => (string) $ssl_inventory, 'entries' => []];
 
-        $php_inventory = uptime_monitor_get_whm_php_vhost_versions($whm_user, $whm_api_token, $server_url);
-        $bundle['php_inventory'] = is_array($php_inventory) ? $php_inventory : ['warning' => (string) $php_inventory, 'by_user' => [], 'by_vhost' => []];
-
         $email_activity = uptime_monitor_get_whm_email_track_activity($whm_user, $whm_api_token, $server_url);
         $bundle['email_activity'] = is_array($email_activity) ? $email_activity : ['warning' => (string) $email_activity, 'available' => false, 'by_user' => [], 'by_domain' => []];
-
-        $bundle['mail_queue'] = uptime_monitor_get_whm_mail_queue_summary($whm_user, $whm_api_token, $server_url);
-        $bundle['backup_health'] = uptime_monitor_get_whm_backup_health(
-            $whm_user,
-            $whm_api_token,
-            $server_url,
-            $bundle['server_stats']['accounts'] ?? []
-        );
     }
 
-    $db_cache = uptime_monitor_get_diagnostics_db_inventory_cache($force_refresh);
-    $usernames = [];
-    foreach (($bundle['server_stats']['accounts'] ?? []) as $account) {
-        if (!is_array($account) || empty($account['username'])) {
-            continue;
-        }
-        $usernames[] = (string) $account['username'];
-    }
-    $bundle['database_inventory'] = uptime_monitor_summarize_database_inventory($db_cache, $usernames);
-    uptime_monitor_apply_diagnostics_account_enrichments($bundle, $db_cache);
+    uptime_monitor_apply_diagnostics_account_enrichments($bundle);
 
     set_transient($cache_key, $bundle, 30 * MINUTE_IN_SECONDS);
     return $bundle;
@@ -4564,7 +4465,7 @@ function uptime_monitor_merge_site_diagnostic_level($current, $candidate) {
 }
 
 function uptime_monitor_get_site_diagnostics_cache_key($site_url) {
-    return 'uptime_monitor_diag_v4_' . md5((string) $site_url);
+    return 'uptime_monitor_diag_v5_' . md5((string) $site_url);
 }
 
 function uptime_monitor_extract_certificate_names($subject_alt_name) {
@@ -6821,32 +6722,7 @@ function uptime_monitor_initialize_diagnostics_job_state($force_refresh = false)
     $site_urls = array_values($site_urls);
 
     $server_bundle = uptime_monitor_get_diagnostics_server_bundle($force_refresh);
-    $db_cache = uptime_monitor_get_diagnostics_db_inventory_cache($force_refresh);
-
-    $db_users = [];
-    foreach (($server_bundle['server_stats']['accounts'] ?? []) as $account) {
-        if (!is_array($account) || empty($account['username'])) {
-            continue;
-        }
-        $db_users[] = (string) $account['username'];
-    }
-    $db_users = array_values(array_unique(array_filter($db_users, 'strlen')));
-
-    $pending_db_users = [];
-    foreach ($db_users as $db_user) {
-        if (!isset($db_cache[$db_user]) || !is_array($db_cache[$db_user])) {
-            $pending_db_users[] = $db_user;
-        }
-    }
-
-    $server_bundle['database_inventory'] = uptime_monitor_summarize_database_inventory(
-        $db_cache,
-        $db_users,
-        '',
-        count($pending_db_users),
-        0
-    );
-    uptime_monitor_apply_diagnostics_account_enrichments($server_bundle, $db_cache);
+    uptime_monitor_apply_diagnostics_account_enrichments($server_bundle);
 
     return [
         'force_refresh'   => !empty($force_refresh),
@@ -6865,10 +6741,10 @@ function uptime_monitor_initialize_diagnostics_job_state($force_refresh = false)
             'unmatched_account' => 0,
         ],
         'server_bundle'   => $server_bundle,
-        'db_cache'        => $db_cache,
-        'all_db_users'    => $db_users,
-        'pending_db_users'=> $pending_db_users,
-        'db_total'        => count($pending_db_users),
+        'db_cache'        => [],
+        'all_db_users'    => [],
+        'pending_db_users'=> [],
+        'db_total'        => 0,
         'db_offset'       => 0,
         'db_warning'      => '',
     ];
@@ -6926,60 +6802,7 @@ function uptime_monitor_process_diagnostics_site_batch(&$state, $batch_site_urls
 }
 
 function uptime_monitor_process_diagnostics_database_batch(&$state) {
-    if (empty($state['pending_db_users']) || !is_array($state['pending_db_users'])) {
-        return;
-    }
-
-    if (($state['db_offset'] ?? 0) >= ($state['db_total'] ?? 0)) {
-        return;
-    }
-
-    $whm_user = get_option('uptime_monitor_whm_user', '');
-    $whm_api_token = get_option('uptime_monitor_whm_api_token', '');
-    $server_url = get_option('uptime_monitor_whm_server_url', '');
-    if ($whm_user === '' || $whm_api_token === '' || $server_url === '') {
-        $state['db_warning'] = uptime_monitor_append_warning_text($state['db_warning'], 'Database inventory requires WHM credentials.');
-        $state['db_offset'] = (int) ($state['db_total'] ?? 0);
-        $state['server_bundle']['database_inventory'] = uptime_monitor_summarize_database_inventory(
-            $state['db_cache'] ?? [],
-            $state['all_db_users'] ?? [],
-            $state['db_warning'],
-            $state['db_total'] ?? 0,
-            $state['db_offset'] ?? 0
-        );
-        return;
-    }
-
-    $batch_size = uptime_monitor_get_diagnostics_db_batch_size(!empty($state['force_refresh']));
-    $batch_users = array_slice((array) $state['pending_db_users'], (int) $state['db_offset'], $batch_size);
-
-    foreach ($batch_users as $db_user) {
-        $inventory = uptime_monitor_get_whm_database_inventory_for_user($whm_user, $whm_api_token, $server_url, $db_user);
-        if (is_array($inventory)) {
-            $state['db_cache'][$db_user] = $inventory;
-        } else {
-            $state['db_warning'] = uptime_monitor_append_warning_text($state['db_warning'], (string) $inventory);
-            if (uptime_monitor_diagnostics_error_looks_like_permission_denied((string) $inventory)) {
-                $state['db_offset'] = (int) ($state['db_total'] ?? 0);
-                break;
-            }
-        }
-
-        $state['db_offset'] = (int) ($state['db_offset'] ?? 0) + 1;
-    }
-
-    if (($state['db_offset'] ?? 0) > (int) ($state['db_total'] ?? 0)) {
-        $state['db_offset'] = (int) ($state['db_total'] ?? 0);
-    }
-
-    $state['server_bundle']['database_inventory'] = uptime_monitor_summarize_database_inventory(
-        $state['db_cache'] ?? [],
-        $state['all_db_users'] ?? [],
-        $state['db_warning'],
-        $state['db_total'] ?? 0,
-        $state['db_offset'] ?? 0
-    );
-    uptime_monitor_apply_diagnostics_account_enrichments($state['server_bundle'], $state['db_cache'] ?? []);
+    return;
 }
 
 function uptime_monitor_finalize_diagnostics_job_state($state) {
@@ -6995,8 +6818,6 @@ function uptime_monitor_finalize_diagnostics_job_state($state) {
         }
         return strcasecmp((string) ($a['site_url'] ?? ''), (string) ($b['site_url'] ?? ''));
     });
-
-    uptime_monitor_save_diagnostics_db_inventory_cache($state['db_cache'] ?? []);
 
     return [
         'summary'      => isset($state['summary']) && is_array($state['summary']) ? $state['summary'] : [],
@@ -7028,85 +6849,7 @@ function uptime_monitor_render_diagnostics_server_panel($title, $level, $summary
 }
 
 function uptime_monitor_render_diagnostics_server_panels($bundle) {
-    $bundle = is_array($bundle) ? $bundle : [];
-    $mail_queue = isset($bundle['mail_queue']) && is_array($bundle['mail_queue']) ? $bundle['mail_queue'] : [];
-    $backup = isset($bundle['backup_health']) && is_array($bundle['backup_health']) ? $bundle['backup_health'] : [];
-    $db_inventory = isset($bundle['database_inventory']) && is_array($bundle['database_inventory']) ? $bundle['database_inventory'] : [];
-
-    echo '<h2>Server Signals</h2>';
-    echo '<div class="uptime-monitor-diagnostics-panel-grid">';
-
-    $mail_queue_lines = [];
-    if (!empty($mail_queue['oldest_time']) && is_numeric($mail_queue['oldest_time'])) {
-        $mail_queue_lines[] = 'Oldest: ' . uptime_monitor_format_duration_brief(time() - (int) $mail_queue['oldest_time']) . ' ago';
-    }
-    if (!empty($mail_queue['total_bytes'])) {
-        $mail_queue_lines[] = 'Queued size: ' . uptime_monitor_format_mb(((float) $mail_queue['total_bytes']) / (1024.0 * 1024.0));
-    }
-    if (!empty($mail_queue['top_users']) && is_array($mail_queue['top_users'])) {
-        $mail_queue_lines[] = 'Top users: ' . implode(', ', $mail_queue['top_users']);
-    }
-    if (!empty($mail_queue['warning'])) {
-        $mail_queue_lines[] = $mail_queue['warning'];
-    }
-    uptime_monitor_render_diagnostics_server_panel(
-        'Mail Queue',
-        $mail_queue['level'] ?? 'unknown',
-        $mail_queue['summary'] ?? 'Unavailable',
-        $mail_queue_lines
-    );
-
-    $backup_lines = [];
-    if (!empty($backup['type'])) {
-        $backup_lines[] = 'Type: ' . $backup['type'];
-    }
-    if (!empty($backup['schedule']) && is_array($backup['schedule'])) {
-        $backup_lines[] = 'Schedule: ' . implode(', ', $backup['schedule']);
-    }
-    if (!empty($backup['destinations']) && is_array($backup['destinations'])) {
-        $destination_total = count($backup['destinations']);
-        $enabled_total = 0;
-        foreach ($backup['destinations'] as $destination) {
-            if (empty($destination['disabled'])) {
-                $enabled_total++;
-            }
-        }
-        $backup_lines[] = 'Destinations: ' . number_format_i18n($enabled_total) . ' enabled / ' . number_format_i18n($destination_total) . ' total';
-    }
-    if (!empty($backup['metadata_users']) && is_array($backup['metadata_users'])) {
-        $backup_lines[] = 'Metadata accounts: ' . number_format_i18n(count($backup['metadata_users']));
-    }
-    if (!empty($backup['warning'])) {
-        $backup_lines[] = $backup['warning'];
-    }
-    uptime_monitor_render_diagnostics_server_panel(
-        'Backup Health',
-        $backup['level'] ?? 'unknown',
-        $backup['summary'] ?? 'Unavailable',
-        $backup_lines
-    );
-
-    $db_lines = [];
-    if (!empty($db_inventory['mysql_version'])) {
-        $db_lines[] = 'MySQL: ' . $db_inventory['mysql_version'];
-    }
-    if (isset($db_inventory['covered_users'], $db_inventory['total_users'])) {
-        $db_lines[] = 'Coverage: ' . number_format_i18n((int) $db_inventory['covered_users']) . ' / ' . number_format_i18n((int) $db_inventory['total_users']) . ' accounts';
-    }
-    if (!empty($db_inventory['top_accounts']) && is_array($db_inventory['top_accounts'])) {
-        $db_lines[] = 'Top accounts: ' . implode(', ', $db_inventory['top_accounts']);
-    }
-    if (!empty($db_inventory['warning'])) {
-        $db_lines[] = $db_inventory['warning'];
-    }
-    uptime_monitor_render_diagnostics_server_panel(
-        'Database Inventory',
-        $db_inventory['level'] ?? 'unknown',
-        $db_inventory['summary'] ?? 'Unavailable',
-        $db_lines
-    );
-
-    echo '</div>';
+    return;
 }
 
 function uptime_monitor_render_diagnostics_results($report) {
@@ -7122,7 +6865,7 @@ function uptime_monitor_render_diagnostics_results($report) {
     }
 
     $warnings = [];
-    foreach (['ssl_inventory', 'php_inventory', 'email_activity'] as $warning_key) {
+    foreach (['ssl_inventory', 'email_activity'] as $warning_key) {
         if (!empty($bundle[$warning_key]['warning'])) {
             $warnings[] = (string) $bundle[$warning_key]['warning'];
         }
@@ -7158,7 +6901,6 @@ function uptime_monitor_render_diagnostics_results($report) {
         $ipv4 = isset($diagnostics['ipv4']) && is_array($diagnostics['ipv4']) ? $diagnostics['ipv4'] : [];
         $ssl = isset($diagnostics['ssl']) && is_array($diagnostics['ssl']) ? $diagnostics['ssl'] : [];
         $mail = isset($diagnostics['mail']) && is_array($diagnostics['mail']) ? $diagnostics['mail'] : [];
-        $php = isset($diagnostics['php']) && is_array($diagnostics['php']) ? $diagnostics['php'] : [];
         $status = isset($result['status']) ? (string) $result['status'] : 'N/A';
         $site_title = isset($result['site_title']) ? (string) $result['site_title'] : '';
         if ($site_title === '' || $site_title === 'N/A') {
@@ -7204,34 +6946,12 @@ function uptime_monitor_render_diagnostics_results($report) {
             if (!empty($account['package'])) {
                 echo '<span>Package: ' . esc_html((string) $account['package']) . '</span>';
             }
-            if (!empty($php['summary'])) {
-                echo '<span>PHP: ' . esc_html((string) $php['summary']) . '</span>';
-            } elseif (!empty($account['php_version_summary'])) {
-                $php_summary = (string) $account['php_version_summary'];
-                if (!empty($account['php_fpm_summary']) && $account['php_fpm_summary'] !== 'Unknown') {
-                    $php_summary .= ' | FPM ' . strtolower((string) $account['php_fpm_summary']);
-                }
-                echo '<span>PHP: ' . esc_html($php_summary) . '</span>';
-            }
             echo '<span>' . esc_html(uptime_monitor_format_disk_quota_summary($account['disk_used_mb'] ?? 0, $account['disk_limit_mb'] ?? null)) . '</span>';
             if (isset($account['bandwidth_used_mb']) && $account['bandwidth_used_mb'] !== null) {
                 echo '<span>' . esc_html(uptime_monitor_format_bandwidth_summary($account['bandwidth_used_mb'], $account['bandwidth_limit_mb'] ?? null)) . '</span>';
             }
             if (isset($account['inodes_used']) && $account['inodes_used'] !== null) {
                 echo '<span>' . esc_html(uptime_monitor_format_inode_summary($account['inodes_used'], $account['inodes_limit'] ?? null)) . '</span>';
-            }
-            if (array_key_exists('backup_metadata_available', $account)) {
-                echo '<span>Backups: ' . esc_html(!empty($account['backup_metadata_available']) ? 'Metadata available' : 'Metadata not visible') . '</span>';
-            }
-            if (isset($account['database_count']) && $account['database_count'] !== null) {
-                $db_text = number_format_i18n((int) $account['database_count']) . ' DB';
-                if ((int) $account['database_count'] !== 1) {
-                    $db_text .= 's';
-                }
-                if (isset($account['database_user_count']) && $account['database_user_count'] !== null) {
-                    $db_text .= ' / ' . number_format_i18n((int) $account['database_user_count']) . ' user' . ((int) $account['database_user_count'] === 1 ? '' : 's');
-                }
-                echo '<span>Databases: ' . esc_html($db_text) . '</span>';
             }
             echo '</div>';
         } elseif (!empty($ipv4['primary_ip'])) {
@@ -7411,7 +7131,7 @@ function uptime_monitor_diagnostics_page() {
 
     echo '<div class="wrap">';
     echo '<h1>Site Diagnostics</h1>';
-    echo '<p class="uptime-monitor-plugin-report-intro">This view batches together WHM account matching, SSL inventory, recent Track Email failures, PHP/package/quota visibility, backup visibility, mail queue health, and database inventory. When a site cannot be tied to a WHM account confidently, the diagnostics table falls back to the site&apos;s IPv4 record.</p>';
+    echo '<p class="uptime-monitor-plugin-report-intro">This view batches together WHM account matching, SSL inventory, recent Track Email failures, and hosting quota/package visibility. When a site cannot be tied to a WHM account confidently, the diagnostics table falls back to the site&apos;s IPv4 record.</p>';
 
     echo '<div class="uptime-monitor-report-actions">';
     echo '<form method="post" action="' . esc_url(admin_url('admin.php?page=uptime-monitor-diagnostics')) . '" class="uptime-monitor-report-refresh-form">';
