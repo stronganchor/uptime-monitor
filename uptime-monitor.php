@@ -3,7 +3,7 @@
 Plugin Name: Uptime Monitor
 Plugin URI: https://github.com/stronganchor/uptime-monitor/
 Description: A plugin to monitor URLs and report their HTTP status and display server stats.
-Version: 1.1.24
+Version: 1.1.25
 Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
 */
@@ -3004,11 +3004,15 @@ function uptime_monitor_get_whm_php_fpm_status($whm_user, $whm_api_token, $serve
         'domains_using_fpm'   => null,
         'total_domains'       => null,
         'domains_to_be_enabled' => null,
+        'new_accounts_we_can_handle' => null,
         'default_accounts_to_fpm' => null,
     ];
 
     $service_inventory = is_array($service_inventory) ? $service_inventory : [];
     $service_entries = [];
+    $service_notes = [];
+    $detail_parts = [];
+    $warning_parts = [];
     foreach (
         [
             'Apache' => 'apache_php_fpm',
@@ -3022,11 +3026,11 @@ function uptime_monitor_get_whm_php_fpm_status($whm_user, $whm_api_token, $serve
         $service = $service_inventory[$service_key];
         $service_entries[] = $service;
         if ($service['running'] === true) {
-            $php_fpm['details'] = trim($php_fpm['details'] . ($php_fpm['details'] === '' ? '' : ' | ') . $service_label . ' running');
+            $service_notes = uptime_monitor_collect_unique_text($service_notes, $service_label . ' running');
         } elseif ($service['running'] === false) {
-            $php_fpm['details'] = trim($php_fpm['details'] . ($php_fpm['details'] === '' ? '' : ' | ') . $service_label . ' down');
+            $service_notes = uptime_monitor_collect_unique_text($service_notes, $service_label . ' down');
         } else {
-            $php_fpm['details'] = trim($php_fpm['details'] . ($php_fpm['details'] === '' ? '' : ' | ') . $service_label . ' unknown');
+            $service_notes = uptime_monitor_collect_unique_text($service_notes, $service_label . ' unknown');
         }
     }
 
@@ -3051,10 +3055,21 @@ function uptime_monitor_get_whm_php_fpm_status($whm_user, $whm_api_token, $serve
     if (!empty($utilization_response['ok'])) {
         $payload = uptime_monitor_get_whm_payload_data($utilization_response['data']);
         if (is_array($payload)) {
-            $domains_using_fpm = uptime_monitor_parse_non_negative_number($payload['domains_using_fpm'] ?? null);
-            $total_domains = uptime_monitor_parse_non_negative_number($payload['total_domains'] ?? ($payload['domains_on_server'] ?? null));
-            $domains_to_be_enabled = uptime_monitor_parse_non_negative_number($payload['domains_to_be_enabled'] ?? ($payload['domains_on_server_but_not_using_fpm'] ?? null));
-            $show_warning = uptime_monitor_parse_optional_boolean($payload['show_warning'] ?? null);
+            $domains_using_fpm = uptime_monitor_parse_non_negative_number(
+                uptime_monitor_extract_scalar_by_keys($payload, ['domains_using_fpm'])
+            );
+            $total_domains = uptime_monitor_parse_non_negative_number(
+                uptime_monitor_extract_scalar_by_keys($payload, ['total_domains', 'domains_on_server'])
+            );
+            $domains_to_be_enabled = uptime_monitor_parse_non_negative_number(
+                uptime_monitor_extract_scalar_by_keys($payload, ['domains_to_be_enabled', 'domains_on_server_but_not_using_fpm'])
+            );
+            $new_accounts_we_can_handle = uptime_monitor_parse_non_negative_number(
+                uptime_monitor_extract_scalar_by_keys($payload, ['number_of_new_fpm_accounts_we_can_handle'])
+            );
+            $show_warning = uptime_monitor_parse_optional_boolean(
+                uptime_monitor_extract_scalar_by_keys($payload, ['show_warning'])
+            );
 
             if ($domains_using_fpm !== null) {
                 $php_fpm['domains_using_fpm'] = (int) round($domains_using_fpm);
@@ -3065,52 +3080,93 @@ function uptime_monitor_get_whm_php_fpm_status($whm_user, $whm_api_token, $serve
             if ($domains_to_be_enabled !== null) {
                 $php_fpm['domains_to_be_enabled'] = (int) round($domains_to_be_enabled);
             }
+            if ($new_accounts_we_can_handle !== null) {
+                $php_fpm['new_accounts_we_can_handle'] = (int) round($new_accounts_we_can_handle);
+            }
 
-            if ($php_fpm['total_domains'] !== null && $php_fpm['total_domains'] > 0) {
+            if ($php_fpm['domains_using_fpm'] !== null && $php_fpm['total_domains'] !== null && $php_fpm['total_domains'] > 0) {
                 $php_fpm['summary'] = number_format_i18n((int) $php_fpm['domains_using_fpm']) . ' / ' . number_format_i18n((int) $php_fpm['total_domains']) . ' domains';
+                if ($php_fpm['level'] === 'unknown') {
+                    $php_fpm['level'] = ((int) $php_fpm['domains_using_fpm'] > 0) ? 'ok' : 'warning';
+                }
+            } elseif ($php_fpm['domains_using_fpm'] !== null) {
+                $php_fpm['summary'] = number_format_i18n((int) $php_fpm['domains_using_fpm']) . ' domains';
                 if ($php_fpm['level'] === 'unknown') {
                     $php_fpm['level'] = ((int) $php_fpm['domains_using_fpm'] > 0) ? 'ok' : 'warning';
                 }
             }
 
-            if ($show_warning === true) {
-                $warning_note = 'Capacity warning';
-                if ($php_fpm['details'] === '') {
-                    $php_fpm['details'] = $warning_note;
-                } else {
-                    $php_fpm['details'] .= ' | ' . $warning_note;
+            if ($php_fpm['domains_to_be_enabled'] !== null) {
+                if ((int) $php_fpm['domains_to_be_enabled'] > 0) {
+                    $detail_parts = uptime_monitor_collect_unique_text(
+                        $detail_parts,
+                        '+' . number_format_i18n((int) $php_fpm['domains_to_be_enabled']) . ' can enable'
+                    );
+                } elseif (
+                    $php_fpm['domains_using_fpm'] !== null
+                    && $php_fpm['total_domains'] !== null
+                    && (int) $php_fpm['domains_using_fpm'] === (int) $php_fpm['total_domains']
+                    && (int) $php_fpm['total_domains'] > 0
+                ) {
+                    $detail_parts = uptime_monitor_collect_unique_text($detail_parts, 'All domains enabled');
                 }
+            }
+
+            if ($php_fpm['new_accounts_we_can_handle'] !== null && (int) $php_fpm['new_accounts_we_can_handle'] > 0) {
+                $detail_parts = uptime_monitor_collect_unique_text(
+                    $detail_parts,
+                    '+' . number_format_i18n((int) $php_fpm['new_accounts_we_can_handle']) . ' more accounts fit'
+                );
+            }
+
+            if ($show_warning === true) {
+                $warning_parts = uptime_monitor_collect_unique_text($warning_parts, 'Capacity warning');
                 $php_fpm['level'] = ($php_fpm['level'] === 'error') ? 'error' : 'warning';
             }
         }
     } else {
-        $php_fpm['warning'] = 'Unable to retrieve PHP-FPM workload data from WHM: ' . ($utilization_response['error'] ?? 'Unknown error');
+        $warning_parts = uptime_monitor_collect_unique_text(
+            $warning_parts,
+            'WHM workload data unavailable: ' . ($utilization_response['error'] ?? 'Unknown error')
+        );
     }
 
     $default_response = uptime_monitor_whm_api_request($whm_user, $whm_api_token, $server_url, 'json-api/php_get_default_accounts_to_fpm?api.version=1');
     if (!empty($default_response['ok'])) {
         $payload = uptime_monitor_get_whm_payload_data($default_response['data']);
-        if (is_array($payload) && array_key_exists('default_accounts_to_fpm', $payload)) {
-            $default_accounts_to_fpm = uptime_monitor_parse_optional_boolean($payload['default_accounts_to_fpm']);
+        if (is_array($payload)) {
+            $default_accounts_to_fpm = uptime_monitor_parse_optional_boolean(
+                uptime_monitor_extract_scalar_by_keys($payload, ['default_accounts_to_fpm'])
+            );
             if ($default_accounts_to_fpm !== null) {
                 $php_fpm['default_accounts_to_fpm'] = $default_accounts_to_fpm;
+                $detail_parts = uptime_monitor_collect_unique_text(
+                    $detail_parts,
+                    'New accounts: ' . ($default_accounts_to_fpm ? 'On' : 'Off')
+                );
             }
         }
-    } elseif ($php_fpm['warning'] === '') {
-        $php_fpm['warning'] = 'Unable to retrieve PHP-FPM default-account status from WHM: ' . ($default_response['error'] ?? 'Unknown error');
+    } else {
+        $warning_parts = uptime_monitor_collect_unique_text(
+            $warning_parts,
+            'WHM default-account status unavailable: ' . ($default_response['error'] ?? 'Unknown error')
+        );
     }
 
-    if ($php_fpm['details'] === '' && $php_fpm['domains_to_be_enabled'] !== null && $php_fpm['domains_to_be_enabled'] > 0) {
-        $php_fpm['details'] = '+' . number_format_i18n((int) $php_fpm['domains_to_be_enabled']) . ' can enable';
+    if (empty($detail_parts) && !empty($service_notes)) {
+        $detail_parts = array_values($service_notes);
+    } elseif (!empty($service_notes)) {
+        foreach ($service_notes as $service_note) {
+            $detail_parts = uptime_monitor_collect_unique_text($detail_parts, $service_note);
+        }
     }
 
-    if ($php_fpm['details'] === '' && $php_fpm['default_accounts_to_fpm'] !== null) {
-        $php_fpm['details'] = 'New accounts: ' . ($php_fpm['default_accounts_to_fpm'] ? 'On' : 'Off');
+    $php_fpm['warning'] = implode(' | ', array_filter($warning_parts, 'strlen'));
+    if ($php_fpm['warning'] !== '') {
+        $detail_parts = uptime_monitor_collect_unique_text($detail_parts, $php_fpm['warning']);
     }
 
-    if ($php_fpm['details'] === '' && $php_fpm['warning'] !== '') {
-        $php_fpm['details'] = $php_fpm['warning'];
-    }
+    $php_fpm['details'] = implode(' | ', array_filter($detail_parts, 'strlen'));
 
     return $php_fpm;
 }
@@ -3935,6 +3991,7 @@ function get_whm_server_stats() {
             'domains_using_fpm'   => null,
             'total_domains'       => null,
             'domains_to_be_enabled' => null,
+            'new_accounts_we_can_handle' => null,
             'default_accounts_to_fpm' => null,
         ],
         'services'                 => [],
