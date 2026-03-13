@@ -3,7 +3,7 @@
 Plugin Name: Uptime Monitor
 Plugin URI: https://github.com/stronganchor/uptime-monitor/
 Description: A plugin to monitor URLs and report their HTTP status and display server stats.
-Version: 1.1.19
+Version: 1.1.20
 Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
 */
@@ -2975,7 +2975,102 @@ function uptime_monitor_normalize_certificate_lookup_key($value) {
     return preg_replace('/^\*\./', '', $value);
 }
 
-function uptime_monitor_get_account_match_candidate($site_host, $account, $ssl_names = []) {
+function uptime_monitor_normalize_ip_address($value) {
+    if (!is_scalar($value)) {
+        return '';
+    }
+
+    $value = trim((string) $value);
+    if ($value === '') {
+        return '';
+    }
+
+    return filter_var($value, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) ? $value : '';
+}
+
+function uptime_monitor_get_account_ip_address($account) {
+    if (!is_array($account)) {
+        return '';
+    }
+
+    foreach (['ip_address', 'ip', 'ipv4', 'ip_cache'] as $key) {
+        if (!isset($account[$key])) {
+            continue;
+        }
+
+        $ip = uptime_monitor_normalize_ip_address($account[$key]);
+        if ($ip !== '') {
+            return $ip;
+        }
+    }
+
+    return '';
+}
+
+function uptime_monitor_get_site_ipv4_details($host) {
+    $details = [
+        'primary_ip' => '',
+        'ips'        => [],
+        'source'     => 'none',
+        'summary'    => 'IPv4 unavailable',
+    ];
+
+    $host = uptime_monitor_normalize_lookup_key($host);
+    if ($host === '') {
+        $details['summary'] = 'No hostname';
+        return $details;
+    }
+
+    $ips = [];
+    if (function_exists('dns_get_record')) {
+        $records = @dns_get_record($host, DNS_A);
+        if (is_array($records)) {
+            foreach ($records as $record) {
+                if (!is_array($record) || !isset($record['ip'])) {
+                    continue;
+                }
+
+                $ip = uptime_monitor_normalize_ip_address($record['ip']);
+                if ($ip !== '') {
+                    $ips[] = $ip;
+                }
+            }
+        }
+    }
+
+    if (!empty($ips)) {
+        $ips = array_values(array_unique($ips));
+        $details['primary_ip'] = $ips[0];
+        $details['ips'] = $ips;
+        $details['source'] = 'dns_a';
+        $details['summary'] = 'A record: ' . implode(', ', $ips);
+        return $details;
+    }
+
+    if (function_exists('gethostbynamel')) {
+        $resolved_ips = @gethostbynamel($host);
+        if (is_array($resolved_ips) && !empty($resolved_ips)) {
+            foreach ($resolved_ips as $resolved_ip) {
+                $ip = uptime_monitor_normalize_ip_address($resolved_ip);
+                if ($ip !== '') {
+                    $ips[] = $ip;
+                }
+            }
+
+            if (!empty($ips)) {
+                $ips = array_values(array_unique($ips));
+                $details['primary_ip'] = $ips[0];
+                $details['ips'] = $ips;
+                $details['source'] = 'resolver';
+                $details['summary'] = 'Resolved IPv4: ' . implode(', ', $ips);
+            }
+        }
+    }
+
+    return $details;
+}
+
+function uptime_monitor_get_account_match_candidate($site_host, $account, $ssl_names = [], $site_ips = [], $ip_is_unique = false) {
     $site_host = uptime_monitor_normalize_lookup_key($site_host);
     if ($site_host === '' || !is_array($account)) {
         return [
@@ -3029,6 +3124,17 @@ function uptime_monitor_get_account_match_candidate($site_host, $account, $ssl_n
     }
 
     if (!is_array($ssl_names) || empty($ssl_names)) {
+        if (!empty($site_ips) && $ip_is_unique) {
+            $account_ip = uptime_monitor_get_account_ip_address($account);
+            if ($account_ip !== '' && in_array($account_ip, $site_ips, true) && $best['score'] < 720) {
+                $best = [
+                    'account'  => $account,
+                    'score'    => 720,
+                    'source'   => 'account_ip_unique',
+                    'evidence' => $account_ip,
+                ];
+            }
+        }
         return $best;
     }
 
@@ -3092,10 +3198,22 @@ function uptime_monitor_get_account_match_candidate($site_host, $account, $ssl_n
         }
     }
 
+    if (!empty($site_ips) && $ip_is_unique) {
+        $account_ip = uptime_monitor_get_account_ip_address($account);
+        if ($account_ip !== '' && in_array($account_ip, $site_ips, true) && $best['score'] < 720) {
+            $best = [
+                'account'  => $account,
+                'score'    => 720,
+                'source'   => 'account_ip_unique',
+                'evidence' => $account_ip,
+            ];
+        }
+    }
+
     return $best;
 }
 
-function uptime_monitor_find_account_for_site_host($site_host, $accounts, $ssl_names = []) {
+function uptime_monitor_find_account_for_site_host($site_host, $accounts, $ssl_names = [], $site_ips = []) {
     if (!is_array($accounts)) {
         return [
             'account'  => [],
@@ -3113,6 +3231,22 @@ function uptime_monitor_find_account_for_site_host($site_host, $accounts, $ssl_n
         ];
     }
 
+    $site_ips = array_values(array_unique(array_filter(array_map('uptime_monitor_normalize_ip_address', (array) $site_ips), 'strlen')));
+    $account_ip_counts = [];
+    if (!empty($site_ips)) {
+        foreach ($accounts as $account) {
+            $account_ip = uptime_monitor_get_account_ip_address($account);
+            if ($account_ip === '' || !in_array($account_ip, $site_ips, true)) {
+                continue;
+            }
+
+            if (!isset($account_ip_counts[$account_ip])) {
+                $account_ip_counts[$account_ip] = 0;
+            }
+            $account_ip_counts[$account_ip]++;
+        }
+    }
+
     $best_match = [
         'account'  => [],
         'score'    => -1,
@@ -3121,7 +3255,14 @@ function uptime_monitor_find_account_for_site_host($site_host, $accounts, $ssl_n
     ];
 
     foreach ($accounts as $account) {
-        $candidate = uptime_monitor_get_account_match_candidate($site_host, $account, $ssl_names);
+        $account_ip = uptime_monitor_get_account_ip_address($account);
+        $candidate = uptime_monitor_get_account_match_candidate(
+            $site_host,
+            $account,
+            $ssl_names,
+            $site_ips,
+            ($account_ip !== '' && (($account_ip_counts[$account_ip] ?? 0) === 1))
+        );
         if (($candidate['score'] ?? -1) > $best_match['score']) {
             $best_match = $candidate;
         }
@@ -3142,6 +3283,10 @@ function uptime_monitor_format_account_match_source($source, $evidence = '') {
             return 'Matched parent domain.';
         case 'account_domain_child':
             return 'Matched nested main domain.';
+        case 'account_ip_unique':
+            return $evidence !== ''
+                ? ('Matched via unique IPv4 `' . $evidence . '`.')
+                : 'Matched via unique IPv4.';
         case 'ssl_account_domain':
             return $evidence !== ''
                 ? ('Matched via SSL certificate domain `' . $evidence . '`.')
@@ -3177,7 +3322,7 @@ function uptime_monitor_merge_site_diagnostic_level($current, $candidate) {
 }
 
 function uptime_monitor_get_site_diagnostics_cache_key($site_url) {
-    return 'uptime_monitor_diag_v2_' . md5((string) $site_url);
+    return 'uptime_monitor_diag_v3_' . md5((string) $site_url);
 }
 
 function uptime_monitor_extract_certificate_names($subject_alt_name) {
@@ -3514,7 +3659,8 @@ function uptime_monitor_get_site_diagnostics($site_url, $server_stats = [], $for
     $accounts = isset($server_stats['accounts']) && is_array($server_stats['accounts']) ? $server_stats['accounts'] : [];
 
     $ssl = uptime_monitor_get_site_certificate_details($site_host, $site_port);
-    $account_match = uptime_monitor_find_account_for_site_host($site_host, $accounts, $ssl['names'] ?? []);
+    $ipv4 = uptime_monitor_get_site_ipv4_details($site_host);
+    $account_match = uptime_monitor_find_account_for_site_host($site_host, $accounts, $ssl['names'] ?? [], $ipv4['ips'] ?? []);
     $account = isset($account_match['account']) && is_array($account_match['account']) ? $account_match['account'] : [];
     $account_domain = is_array($account) ? (string) ($account['domain'] ?? '') : '';
     $mail = uptime_monitor_get_mail_domain_probe($site_host, $account_domain);
@@ -3540,6 +3686,7 @@ function uptime_monitor_get_site_diagnostics($site_url, $server_stats = [], $for
         'account_summary'  => $account_summary,
         'account_source'   => isset($account_match['source']) ? (string) $account_match['source'] : '',
         'account_evidence' => isset($account_match['evidence']) ? (string) $account_match['evidence'] : '',
+        'ipv4'             => $ipv4,
         'ssl'              => $ssl,
         'mail'             => $mail,
         'checked_at'       => time(),
@@ -3722,6 +3869,7 @@ function get_whm_server_stats() {
         $accounts_data[] = [
             'username'       => $username,
             'domain'         => $domain,
+            'ip_address'     => uptime_monitor_get_account_ip_address($account),
             'disk_used_mb'   => $disk_used_mb,
             'disk_limit_mb'  => $has_disk_limit ? $disk_limit_mb : null,
             'disk_free_mb'   => $disk_free_mb,
@@ -5386,7 +5534,7 @@ function uptime_monitor_diagnostics_page() {
 
     echo '<div class="wrap">';
     echo '<h1>Site Diagnostics</h1>';
-    echo '<p class="uptime-monitor-plugin-report-intro">This view adds hosting-account mapping, SSL expiry checks, and mail DNS readiness checks on top of the MainWP uptime report.</p>';
+    echo '<p class="uptime-monitor-plugin-report-intro">This view adds hosting info, SSL expiry checks, and mail DNS readiness checks on top of the MainWP uptime report. When a site cannot be tied to a WHM account confidently, the diagnostics table falls back to the site&apos;s IPv4 record.</p>';
 
     if ($force_refresh) {
         echo '<div class="notice notice-success"><p>Site diagnostics refreshed.</p></div>';
@@ -5464,11 +5612,11 @@ function uptime_monitor_diagnostics_page() {
     echo '<div class="uptime-monitor-overview-card"><span class="uptime-monitor-overview-card-label">Down Sites</span><strong class="uptime-monitor-overview-card-value">' . esc_html(number_format($summary['sites_down'])) . '</strong></div>';
     echo '<div class="uptime-monitor-overview-card"><span class="uptime-monitor-overview-card-label">SSL Issues</span><strong class="uptime-monitor-overview-card-value">' . esc_html(number_format($summary['ssl_issues'])) . '</strong></div>';
     echo '<div class="uptime-monitor-overview-card"><span class="uptime-monitor-overview-card-label">Mail Issues</span><strong class="uptime-monitor-overview-card-value">' . esc_html(number_format($summary['mail_issues'])) . '</strong></div>';
-    echo '<div class="uptime-monitor-overview-card"><span class="uptime-monitor-overview-card-label">Unmatched Accounts</span><strong class="uptime-monitor-overview-card-value">' . esc_html(number_format($summary['unmatched_account'])) . '</strong></div>';
+    echo '<div class="uptime-monitor-overview-card"><span class="uptime-monitor-overview-card-label">Sites Without Account Match</span><strong class="uptime-monitor-overview-card-value">' . esc_html(number_format($summary['unmatched_account'])) . '</strong></div>';
     echo '</div>';
 
     echo '<table class="widefat striped uptime-monitor-diagnostics-table">';
-    echo '<thead><tr><th>Site</th><th>Uptime</th><th>Hosting Account</th><th>SSL Certificate</th><th>Email Readiness</th><th>Checked</th></tr></thead>';
+    echo '<thead><tr><th>Site</th><th>Uptime</th><th>Hosting Info</th><th>SSL Certificate</th><th>Email Readiness</th><th>Checked</th></tr></thead>';
     echo '<tbody>';
 
     foreach ($rows as $row) {
@@ -5479,6 +5627,7 @@ function uptime_monitor_diagnostics_page() {
         $account_source = isset($diagnostics['account_source']) ? (string) $diagnostics['account_source'] : '';
         $account_evidence = isset($diagnostics['account_evidence']) ? (string) $diagnostics['account_evidence'] : '';
         $account_source_note = uptime_monitor_format_account_match_source($account_source, $account_evidence);
+        $ipv4 = isset($diagnostics['ipv4']) && is_array($diagnostics['ipv4']) ? $diagnostics['ipv4'] : [];
         $ssl = isset($diagnostics['ssl']) && is_array($diagnostics['ssl']) ? $diagnostics['ssl'] : [];
         $mail = isset($diagnostics['mail']) && is_array($diagnostics['mail']) ? $diagnostics['mail'] : [];
         $status = isset($result['status']) ? (string) $result['status'] : 'N/A';
@@ -5528,8 +5677,17 @@ function uptime_monitor_diagnostics_page() {
                 echo '<span>' . esc_html(uptime_monitor_format_inode_summary($account['inodes_used'], $account['inodes_limit'] ?? null)) . '</span>';
             }
             echo '</div>';
+        } elseif (!empty($ipv4['primary_ip'])) {
+            echo uptime_monitor_render_diagnostic_badge('warning', 'No clear account match');
+            echo '<div class="uptime-monitor-diagnostics-meta">';
+            echo '<span>' . esc_html($ipv4['summary'] ?? ('IPv4: ' . $ipv4['primary_ip'])) . '</span>';
+            if (!empty($accounts_visible)) {
+                echo '<span>Using site IPv4 because no WHM account matched confidently.</span>';
+            }
+            echo '</div>';
         } elseif (!empty($accounts_visible)) {
-            echo uptime_monitor_render_diagnostic_badge('warning', 'No matching account');
+            echo uptime_monitor_render_diagnostic_badge('warning', 'No clear account match');
+            echo '<div class="uptime-monitor-diagnostics-meta"><span>IPv4 lookup unavailable.</span></div>';
         } else {
             echo uptime_monitor_render_diagnostic_badge('unknown', 'Unavailable');
         }
