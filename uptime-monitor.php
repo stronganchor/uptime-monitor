@@ -3,7 +3,7 @@
 Plugin Name: Uptime Monitor
 Plugin URI: https://github.com/stronganchor/uptime-monitor/
 Description: A plugin to monitor URLs and report their HTTP status and display server stats.
-Version: 1.1.32
+Version: 1.1.33
 Update URI: https://github.com/stronganchor/uptime-monitor
 Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
@@ -2660,7 +2660,9 @@ function uptime_monitor_settings_page() {
     $whm_server_url    = get_option('uptime_monitor_whm_server_url', '');
     $mainwp_from_email = get_option('uptime_monitor_mainwp_from_email', '');
     $server_health_report_url = get_option('uptime_monitor_server_health_report_url', '');
-    $server_health_report_auth_header_set = trim((string) get_option('uptime_monitor_server_health_report_auth_header', '')) !== '';
+    $server_health_report_auth_header = trim((string) get_option('uptime_monitor_server_health_report_auth_header', ''));
+    $server_health_report_auth_header_set = $server_health_report_auth_header !== '';
+    $server_health_report_header_config = uptime_monitor_parse_server_health_report_header($server_health_report_auth_header);
     $server_health_report_cache_ttl = absint(get_option('uptime_monitor_server_health_report_cache_ttl', 300));
     $server_health_report_cache_ttl = $server_health_report_cache_ttl > 0 ? $server_health_report_cache_ttl : 300;
 
@@ -2708,6 +2710,11 @@ function uptime_monitor_settings_page() {
     echo '<td>';
     echo '<input type="password" id="server_health_report_auth_header" name="server_health_report_auth_header" value="" class="regular-text" autocomplete="new-password" placeholder="X-Server-Health-Token: token-value">';
     echo '<p class="description">Optional. Enter the full request header line. Leave blank to keep the saved value. Current status: ' . esc_html($server_health_report_auth_header_set ? 'saved' : 'not saved') . '.</p>';
+    if ($server_health_report_auth_header_set) {
+        $saved_header_name = isset($server_health_report_header_config['name']) ? (string) $server_health_report_header_config['name'] : '';
+        $saved_header_valid = !empty($server_health_report_header_config['valid']);
+        echo '<p class="description">Saved request header name: ' . esc_html($saved_header_valid && $saved_header_name !== '' ? $saved_header_name : 'invalid or not detected') . '.</p>';
+    }
     echo '<label><input type="checkbox" name="server_health_report_auth_header_clear" value="1"> Clear saved request header</label>';
     echo '</td>';
     echo '</tr>';
@@ -5927,7 +5934,12 @@ function uptime_monitor_get_server_health_report_cache_ttl() {
 function uptime_monitor_parse_server_health_report_header($configured_header) {
     $configured_header = trim((string) $configured_header);
     if ($configured_header === '') {
-        return [];
+        return [
+            'headers' => [],
+            'name'    => '',
+            'valid'   => true,
+            'error'   => '',
+        ];
     }
 
     $colon_pos = strpos($configured_header, ':');
@@ -5936,13 +5948,28 @@ function uptime_monitor_parse_server_health_report_header($configured_header) {
         $value = trim(substr($configured_header, $colon_pos + 1));
 
         if ($name !== '' && $value !== '' && preg_match('/^[A-Za-z][A-Za-z0-9_-]*$/', $name)) {
-            return [$name => $value];
+            return [
+                'headers' => [$name => $value],
+                'name'    => $name,
+                'valid'   => true,
+                'error'   => '',
+            ];
         }
 
-        return [];
+        return [
+            'headers' => [],
+            'name'    => $name,
+            'valid'   => false,
+            'error'   => 'Saved request header must use the format Header-Name: value.',
+        ];
     }
 
-    return ['Authorization' => $configured_header];
+    return [
+        'headers' => ['Authorization' => $configured_header],
+        'name'    => 'Authorization',
+        'valid'   => true,
+        'error'   => '',
+    ];
 }
 
 function uptime_monitor_get_server_health_report($force_refresh = false) {
@@ -5957,10 +5984,14 @@ function uptime_monitor_get_server_health_report($force_refresh = false) {
         ];
     }
 
+    $auth_header = trim((string) get_option('uptime_monitor_server_health_report_auth_header', ''));
+    $header_config = uptime_monitor_parse_server_health_report_header($auth_header);
+    $header_hash = $auth_header === '' ? '' : hash('sha256', $auth_header);
+
     $cache_key = 'uptime_monitor_server_health_report_cache';
     if (!$force_refresh) {
         $cached = get_transient($cache_key);
-        if (is_array($cached) && isset($cached['url_hash']) && $cached['url_hash'] === md5($url)) {
+        if (is_array($cached) && isset($cached['url_hash'], $cached['header_hash']) && $cached['url_hash'] === md5($url) && $cached['header_hash'] === $header_hash) {
             return $cached;
         }
     }
@@ -5972,19 +6003,27 @@ function uptime_monitor_get_server_health_report($force_refresh = false) {
         'headers'     => [],
     ];
 
-    $auth_header = trim((string) get_option('uptime_monitor_server_health_report_auth_header', ''));
-    if ($auth_header !== '') {
-        $args['headers'] = array_merge($args['headers'], uptime_monitor_parse_server_health_report_header($auth_header));
+    if (!empty($header_config['headers']) && is_array($header_config['headers'])) {
+        $args['headers'] = array_merge($args['headers'], $header_config['headers']);
     }
 
     $payload = [
-        'configured' => true,
-        'ok'         => false,
-        'error'      => '',
-        'data'       => null,
-        'fetched_at' => time(),
-        'url_hash'   => md5($url),
+        'configured'          => true,
+        'ok'                  => false,
+        'error'               => '',
+        'data'                => null,
+        'fetched_at'          => time(),
+        'url_hash'            => md5($url),
+        'header_hash'         => $header_hash,
+        'request_header_name' => isset($header_config['name']) ? (string) $header_config['name'] : '',
+        'request_header_ok'   => !empty($header_config['valid']),
     ];
+
+    if (empty($header_config['valid'])) {
+        $payload['error'] = isset($header_config['error']) ? (string) $header_config['error'] : 'Saved request header is invalid.';
+        set_transient($cache_key, $payload, uptime_monitor_get_server_health_report_cache_ttl());
+        return $payload;
+    }
 
     $response = wp_remote_get($url, $args);
     if (is_wp_error($response)) {
@@ -5996,6 +6035,10 @@ function uptime_monitor_get_server_health_report($force_refresh = false) {
     $status_code = (int) wp_remote_retrieve_response_code($response);
     if ($status_code !== 200) {
         $payload['error'] = 'Report URL returned HTTP ' . $status_code . '.';
+        $body_sample = trim(preg_replace('/\s+/', ' ', wp_strip_all_tags((string) wp_remote_retrieve_body($response))));
+        if ($body_sample !== '') {
+            $payload['error'] .= ' Response body: ' . substr($body_sample, 0, 160);
+        }
         set_transient($cache_key, $payload, uptime_monitor_get_server_health_report_cache_ttl());
         return $payload;
     }
@@ -6098,6 +6141,10 @@ function uptime_monitor_render_server_health_report($health) {
         echo '</div>';
         if (!empty($health['error'])) {
             echo '<p class="uptime-monitor-server-health-error">' . esc_html((string) $health['error']) . '</p>';
+        }
+        $request_header_name = isset($health['request_header_name']) ? (string) $health['request_header_name'] : '';
+        if ($request_header_name !== '') {
+            echo '<p class="uptime-monitor-inline-note">Configured request header: ' . esc_html($request_header_name) . '.</p>';
         }
         echo '</div>';
         return;
