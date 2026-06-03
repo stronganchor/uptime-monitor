@@ -3,7 +3,7 @@
 Plugin Name: Uptime Monitor
 Plugin URI: https://github.com/stronganchor/uptime-monitor/
 Description: A plugin to monitor URLs and report their HTTP status and display server stats.
-Version: 1.1.33
+Version: 1.1.34
 Update URI: https://github.com/stronganchor/uptime-monitor
 Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
@@ -6125,6 +6125,42 @@ function uptime_monitor_format_server_health_backlog($listen_rows) {
     return empty($parts) ? 'not reported' : implode(', ', $parts);
 }
 
+function uptime_monitor_format_server_health_php_fpm_pools($pools) {
+    if (!is_array($pools) || empty($pools)) {
+        return 'not reported';
+    }
+
+    $parts = [];
+    foreach ($pools as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+
+        $pool = isset($row['pool']) ? (string) $row['pool'] : '';
+        if ($pool === '') {
+            continue;
+        }
+
+        $workers = isset($row['workers']) && is_numeric($row['workers']) ? (int) $row['workers'] : null;
+        $max_children = isset($row['max_children']) && is_numeric($row['max_children']) ? (int) $row['max_children'] : null;
+        if ($workers === null && $max_children === null) {
+            continue;
+        }
+
+        $value = $workers === null ? '?' : (string) $workers;
+        if ($max_children !== null && $max_children > 0) {
+            $value .= '/' . $max_children;
+        }
+
+        $parts[] = $pool . ' ' . $value;
+        if (count($parts) >= 4) {
+            break;
+        }
+    }
+
+    return empty($parts) ? 'not reported' : implode('; ', $parts);
+}
+
 function uptime_monitor_render_server_health_report($health) {
     if (empty($health['configured'])) {
         return;
@@ -6171,6 +6207,9 @@ function uptime_monitor_render_server_health_report($health) {
     $backlog = uptime_monitor_format_server_health_backlog(uptime_monitor_get_array_path($report, ['apache', 'sockets', 'listen'], []));
     $saturation_counts = uptime_monitor_format_server_health_counts(uptime_monitor_get_array_path($report, ['apache', 'errors', 'saturation_counts'], []));
     $csf_blocks = uptime_monitor_get_array_path($report, ['firewall', 'csf', 'count'], null);
+    $php_fpm_workers = uptime_monitor_get_array_path($report, ['php_fpm', 'total_workers'], null);
+    $php_fpm_pools = uptime_monitor_format_server_health_php_fpm_pools(uptime_monitor_get_array_path($report, ['php_fpm', 'pools'], []));
+    $php_fpm_errors = uptime_monitor_format_server_health_counts(uptime_monitor_get_array_path($report, ['php_fpm', 'errors', 'counts'], []));
     $reasons = is_array($status) && isset($status['reasons']) && is_array($status['reasons']) ? $status['reasons'] : [];
 
     echo '<div class="uptime-monitor-server-health-summary">';
@@ -6196,6 +6235,8 @@ function uptime_monitor_render_server_health_report($health) {
     echo '<div><span>Active web sockets</span><strong>' . esc_html($web_sockets === null ? 'unknown' : $web_sockets) . '</strong></div>';
     echo '<div><span>Apache saturation errors</span><strong>' . esc_html($saturation_counts) . '</strong></div>';
     echo '<div><span>CSF temp blocks</span><strong>' . esc_html($csf_blocks === null ? 'unknown' : $csf_blocks) . '</strong></div>';
+    echo '<div><span>PHP-FPM workers</span><strong>' . esc_html($php_fpm_workers === null ? 'unknown' : $php_fpm_workers) . '</strong><small>' . esc_html($php_fpm_pools) . '</small></div>';
+    echo '<div><span>PHP-FPM recent errors</span><strong>' . esc_html($php_fpm_errors) . '</strong></div>';
     echo '</div>';
 
     echo '</div>';
