@@ -3,7 +3,7 @@
 Plugin Name: Uptime Monitor
 Plugin URI: https://github.com/stronganchor/uptime-monitor/
 Description: A plugin to monitor URLs and report their HTTP status and display server stats.
-Version: 1.1.34
+Version: 1.1.35
 Update URI: https://github.com/stronganchor/uptime-monitor
 Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
@@ -6076,6 +6076,60 @@ function uptime_monitor_format_server_health_age($timestamp) {
     return human_time_diff($timestamp, time()) . ' ago';
 }
 
+function uptime_monitor_format_server_health_time($timestamp) {
+    $timestamp = is_numeric($timestamp) ? (int) $timestamp : 0;
+    if ($timestamp <= 0) {
+        return 'unknown';
+    }
+
+    $datetime = gmdate('c', $timestamp);
+    $fallback_format = trim((string) get_option('date_format') . ' ' . (string) get_option('time_format') . ' T');
+    $fallback = wp_date($fallback_format, $timestamp);
+
+    return '<time class="uptime-monitor-local-time" datetime="' . esc_attr($datetime) . '" data-timestamp="' . esc_attr((string) $timestamp) . '">' . esc_html($fallback) . '</time>';
+}
+
+function uptime_monitor_render_server_health_time_script() {
+    static $rendered = false;
+    if ($rendered) {
+        return;
+    }
+    $rendered = true;
+    ?>
+    <script>
+    (function() {
+        function formatLocalTimes() {
+            var nodes = document.querySelectorAll('.uptime-monitor-local-time[data-timestamp]');
+            for (var i = 0; i < nodes.length; i++) {
+                var timestamp = parseInt(nodes[i].getAttribute('data-timestamp'), 10);
+                if (!timestamp || !window.Intl || !Intl.DateTimeFormat) {
+                    continue;
+                }
+                try {
+                    nodes[i].textContent = new Intl.DateTimeFormat(undefined, {
+                        year: 'numeric',
+                        month: 'short',
+                        day: 'numeric',
+                        hour: 'numeric',
+                        minute: '2-digit',
+                        timeZoneName: 'short'
+                    }).format(new Date(timestamp * 1000));
+                } catch (error) {
+                    // Keep the server-rendered fallback.
+                }
+            }
+        }
+
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', formatLocalTimes);
+        } else {
+            formatLocalTimes();
+        }
+    })();
+    </script>
+    <?php
+}
+
 function uptime_monitor_normalize_server_health_level($level) {
     $level = strtoupper(trim((string) $level));
     if ($level === 'OK') {
@@ -6168,12 +6222,13 @@ function uptime_monitor_render_server_health_report($health) {
 
     echo '<h2>Private Server Health Report</h2>';
     echo '<div class="uptime-monitor-server-health-report">';
+    uptime_monitor_render_server_health_time_script();
 
     if (empty($health['ok']) || !is_array($health['data'])) {
         echo '<div class="uptime-monitor-server-health-summary">';
         echo '<span class="uptime-monitor-health-badge uptime-monitor-health-badge-error">UNREACHABLE</span>';
         echo '<strong>Unable to fetch the private server health report.</strong>';
-        echo '<span class="uptime-monitor-inline-note">Fetched ' . esc_html(uptime_monitor_format_server_health_age($health['fetched_at'] ?? 0)) . '.</span>';
+        echo '<span class="uptime-monitor-inline-note">Fetched ' . uptime_monitor_format_server_health_time($health['fetched_at'] ?? 0) . '.</span>';
         echo '</div>';
         if (!empty($health['error'])) {
             echo '<p class="uptime-monitor-server-health-error">' . esc_html((string) $health['error']) . '</p>';
@@ -6192,7 +6247,6 @@ function uptime_monitor_render_server_health_report($health) {
     $level_class = uptime_monitor_normalize_server_health_level($level_raw);
     $summary = is_array($status) && isset($status['summary']) ? (string) $status['summary'] : 'No summary was included.';
     $generated_epoch = uptime_monitor_get_array_path($report, ['generated_epoch'], 0);
-    $generated_age = uptime_monitor_format_server_health_age($generated_epoch);
     $is_stale = is_numeric($generated_epoch) && (time() - (int) $generated_epoch) > (15 * MINUTE_IN_SECONDS);
 
     if ($is_stale && ($level_class === 'ok' || $level_class === 'unknown')) {
@@ -6215,7 +6269,7 @@ function uptime_monitor_render_server_health_report($health) {
     echo '<div class="uptime-monitor-server-health-summary">';
     echo '<span class="uptime-monitor-health-badge uptime-monitor-health-badge-' . esc_attr($level_class) . '">' . esc_html($level_raw) . '</span>';
     echo '<strong>' . esc_html($summary) . '</strong>';
-    echo '<span class="uptime-monitor-inline-note">Generated ' . esc_html($generated_age) . '; fetched ' . esc_html(uptime_monitor_format_server_health_age($health['fetched_at'] ?? 0)) . '.</span>';
+    echo '<span class="uptime-monitor-inline-note">Generated ' . uptime_monitor_format_server_health_time($generated_epoch) . '.</span>';
     echo '</div>';
 
     if (!empty($reasons)) {
