@@ -3,7 +3,7 @@
 Plugin Name: Uptime Monitor
 Plugin URI: https://github.com/stronganchor/uptime-monitor/
 Description: A plugin to monitor URLs and report their HTTP status and display server stats.
-Version: 1.1.35
+Version: 1.1.36
 Update URI: https://github.com/stronganchor/uptime-monitor
 Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
@@ -7070,6 +7070,48 @@ function uptime_monitor_ajax_get_live_load() {
 }
 add_action('wp_ajax_uptime_monitor_get_live_load', 'uptime_monitor_ajax_get_live_load');
 
+function uptime_monitor_render_background_check_status($sites, $last_checked) {
+    $sites = is_array($sites) ? $sites : [];
+    $last_checked = is_array($last_checked) ? $last_checked : [];
+    $site_count = count($sites);
+    $batch_size = uptime_monitor_get_site_check_batch_size();
+    $cycle_minutes = $site_count > 0 ? (int) ceil($site_count / $batch_size) * 5 : 0;
+    $last_run = absint(get_option('uptime_monitor_site_check_last_run', 0));
+    $last_batch_count = absint(get_option('uptime_monitor_site_check_last_batch_count', 0));
+    $last_error = trim((string) get_option('uptime_monitor_site_check_last_error', ''));
+    $next_batch = wp_next_scheduled('uptime_monitor_site_check_batch');
+    $next_hourly = wp_next_scheduled('uptime_monitor_hourly_check');
+    $now = current_time('timestamp');
+    $stale_threshold = $now - DAY_IN_SECONDS;
+    $stale_count = 0;
+
+    foreach ($sites as $site_info) {
+        $site_url = is_array($site_info) && isset($site_info['site_url']) ? (string) $site_info['site_url'] : (string) $site_info;
+        if ($site_url === '' || empty($last_checked[$site_url]) || (int) $last_checked[$site_url] < $stale_threshold) {
+            $stale_count++;
+        }
+    }
+
+    $parts = [];
+    $parts[] = 'Background checks: ' . $batch_size . ' sites every 5 minutes';
+    if ($cycle_minutes > 0) {
+        $parts[] = 'full cycle about ' . $cycle_minutes . ' minutes';
+    }
+    $parts[] = 'last batch: ' . ($last_run > 0 ? date_i18n('m/d H:i', $last_run) . ' (' . $last_batch_count . ' sites)' : 'never');
+    $parts[] = 'next batch: ' . ($next_batch ? date_i18n('m/d H:i', $next_batch) : 'not scheduled');
+    $parts[] = 'legacy hourly: ' . ($next_hourly ? date_i18n('m/d H:i', $next_hourly) : 'not scheduled');
+    $parts[] = 'stale over 24h: ' . $stale_count;
+
+    if (defined('DISABLE_WP_CRON') && DISABLE_WP_CRON) {
+        $parts[] = 'WP-Cron is disabled';
+    }
+    if ($last_error !== '') {
+        $parts[] = 'last error: ' . $last_error;
+    }
+
+    echo '<p class="uptime-monitor-inline-note">' . esc_html(implode(' | ', $parts)) . '</p>';
+}
+
 // Step 4: Display server stats at the top of the Uptime Monitor page
 function uptime_monitor_page() {
     if (!current_user_can('manage_options')) {
@@ -7199,6 +7241,7 @@ function uptime_monitor_page() {
     echo '<input type="submit" name="check_all_sites" class="button button-primary" value="Check All Sites">';
     echo '</form>';
     echo ' <a href="' . esc_url(admin_url('admin.php?page=uptime-monitor-diagnostics')) . '" class="button button-secondary">Open Diagnostics</a>';
+    uptime_monitor_render_background_check_status($sites, $last_checked);
 
     echo '<h2>MainWP Child Sites</h2>';
     echo '<table class="widefat">';
@@ -9509,6 +9552,10 @@ function uptime_monitor_schedule_task() {
         wp_schedule_event(time(), 'hourly', 'uptime_monitor_hourly_check');
     }
 
+    if (!wp_next_scheduled('uptime_monitor_site_check_batch')) {
+        wp_schedule_event(time() + 120, 'uptime_monitor_every_five_minutes', 'uptime_monitor_site_check_batch');
+    }
+
     if (!wp_next_scheduled('uptime_monitor_load_sample_check')) {
         wp_schedule_event(time() + 60, 'uptime_monitor_every_five_minutes', 'uptime_monitor_load_sample_check');
     }
@@ -9527,6 +9574,71 @@ function uptime_monitor_add_cron_intervals($schedules) {
 }
 add_filter('cron_schedules', 'uptime_monitor_add_cron_intervals');
 
+function uptime_monitor_get_site_check_batch_size() {
+    $batch_size = (int) apply_filters('uptime_monitor_site_check_batch_size', 5);
+    return max(1, min(20, $batch_size));
+}
+
+function uptime_monitor_perform_site_check_batch($batch_size = null) {
+    $sites = uptime_monitor_get_mainwp_sites();
+    $sites = array_values(array_unique(array_filter(array_map('strval', $sites), 'strlen')));
+    $site_count = count($sites);
+
+    if ($site_count === 0) {
+        update_option('uptime_monitor_site_check_last_run', current_time('timestamp'));
+        update_option('uptime_monitor_site_check_last_batch_count', 0);
+        update_option('uptime_monitor_site_check_last_error', 'No MainWP child sites were found.');
+        return [
+            'checked' => 0,
+            'failed'  => [],
+        ];
+    }
+
+    $batch_size = $batch_size === null ? uptime_monitor_get_site_check_batch_size() : (int) $batch_size;
+    $batch_size = max(1, min($site_count, $batch_size));
+    $cursor = absint(get_option('uptime_monitor_site_check_cursor', 0));
+    if ($cursor >= $site_count) {
+        $cursor = 0;
+    }
+
+    $failed_sites = [];
+    $checked = 0;
+    $next_cursor = $cursor;
+    $started = microtime(true);
+    $max_runtime = (float) apply_filters('uptime_monitor_site_check_batch_max_runtime', 45.0);
+
+    for ($i = 0; $i < $site_count && $checked < $batch_size; $i++) {
+        $index = ($cursor + $i) % $site_count;
+        $site = $sites[$index];
+        $result = uptime_monitor_perform_check($site);
+
+        if (strpos($result['status'], 'Error') !== false || $result['keyword_match'] === 'No match found') {
+            $failed_sites[$site] = $result['status'] . ' - ' . $result['keyword_match'];
+        }
+
+        $checked++;
+        $next_cursor = ($index + 1) % $site_count;
+
+        if ($checked >= 1 && (microtime(true) - $started) >= $max_runtime) {
+            break;
+        }
+    }
+
+    update_option('uptime_monitor_site_check_cursor', $next_cursor);
+    update_option('uptime_monitor_site_check_last_run', current_time('timestamp'));
+    update_option('uptime_monitor_site_check_last_batch_count', $checked);
+    update_option('uptime_monitor_site_check_last_error', '');
+
+    if (!empty($failed_sites)) {
+        uptime_monitor_send_notification($failed_sites);
+    }
+
+    return [
+        'checked' => $checked,
+        'failed'  => $failed_sites,
+    ];
+}
+
 function uptime_monitor_capture_load_sample() {
     $whm_user      = get_option('uptime_monitor_whm_user');
     $whm_api_token = get_option('uptime_monitor_whm_api_token');
@@ -9544,22 +9656,10 @@ function uptime_monitor_capture_load_sample() {
 add_action('uptime_monitor_load_sample_check', 'uptime_monitor_capture_load_sample');
 
 function uptime_monitor_perform_hourly_check() {
-    $sites = uptime_monitor_get_mainwp_sites();
-    $failed_sites = [];
-
-    foreach ($sites as $site) {
-        $result = uptime_monitor_perform_check($site);
-
-        if (strpos($result['status'], 'Error') !== false || $result['keyword_match'] === 'No match found') {
-            $failed_sites[$site] = $result['status'] . ' - ' . $result['keyword_match'];
-        }
-    }
-
-    if (!empty($failed_sites)) {
-        uptime_monitor_send_notification($failed_sites);
-    }
+    uptime_monitor_perform_site_check_batch();
 }
 add_action('uptime_monitor_hourly_check', 'uptime_monitor_perform_hourly_check');
+add_action('uptime_monitor_site_check_batch', 'uptime_monitor_perform_site_check_batch');
 
 function uptime_monitor_perform_check($site) {
     $result       = uptime_monitor_check_status($site);
