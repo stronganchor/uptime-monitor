@@ -3,7 +3,7 @@
 Plugin Name: Uptime Monitor
 Plugin URI: https://github.com/stronganchor/uptime-monitor/
 Description: A plugin to monitor URLs and report their HTTP status and display server stats.
-Version: 1.1.37
+Version: 1.1.38
 Update URI: https://github.com/stronganchor/uptime-monitor
 Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
@@ -7114,6 +7114,47 @@ function uptime_monitor_format_background_check_schedule_time($timestamp) {
     return $formatted;
 }
 
+function uptime_monitor_format_background_check_duration($seconds) {
+    $seconds = max(0, absint($seconds));
+    if ($seconds < MINUTE_IN_SECONDS) {
+        return $seconds . 's';
+    }
+
+    $minutes = (int) floor($seconds / MINUTE_IN_SECONDS);
+    if ($minutes < 60) {
+        return $minutes . 'm';
+    }
+
+    $hours = (int) floor($minutes / 60);
+    $remaining_minutes = $minutes % 60;
+    return $remaining_minutes > 0 ? ($hours . 'h ' . $remaining_minutes . 'm') : ($hours . 'h');
+}
+
+function uptime_monitor_format_background_check_fallback_result($result) {
+    if (!is_array($result) || empty($result['at'])) {
+        return '';
+    }
+
+    $reason = isset($result['reason']) ? (string) $result['reason'] : '';
+    $checked = isset($result['checked']) ? absint($result['checked']) : 0;
+    $at = absint($result['at']);
+    $time_text = $at > 0 ? date_i18n('m/d H:i', $at) : 'unknown time';
+
+    if (!empty($result['ran'])) {
+        return 'fallback ran ' . $time_text . ' (' . $checked . ' sites)';
+    }
+
+    if ($reason === 'locked') {
+        return 'fallback locked ' . $time_text;
+    }
+
+    if ($reason === 'not_due') {
+        return 'fallback checked ' . $time_text . ' (not due)';
+    }
+
+    return 'fallback checked ' . $time_text . ($reason !== '' ? ' (' . $reason . ')' : '');
+}
+
 function uptime_monitor_render_background_check_status($sites, $last_checked) {
     $sites = is_array($sites) ? $sites : [];
     $last_checked = is_array($last_checked) ? $last_checked : [];
@@ -7123,6 +7164,7 @@ function uptime_monitor_render_background_check_status($sites, $last_checked) {
     $last_run = absint(get_option('uptime_monitor_site_check_last_run', 0));
     $last_batch_count = absint(get_option('uptime_monitor_site_check_last_batch_count', 0));
     $last_error = trim((string) get_option('uptime_monitor_site_check_last_error', ''));
+    $last_fallback_result = get_option('uptime_monitor_site_check_fallback_last_result', []);
     $next_batch = wp_next_scheduled('uptime_monitor_site_check_batch');
     $next_hourly = wp_next_scheduled('uptime_monitor_hourly_check');
     $now = current_time('timestamp');
@@ -7143,8 +7185,16 @@ function uptime_monitor_render_background_check_status($sites, $last_checked) {
     }
     $parts[] = 'last batch: ' . ($last_run > 0 ? date_i18n('m/d H:i', $last_run) . ' (' . $last_batch_count . ' sites)' : 'never');
     $parts[] = 'next batch: ' . uptime_monitor_format_background_check_schedule_time($next_batch);
+    if ($next_batch && (int) $next_batch <= time()) {
+        $parts[] = 'overdue by ' . uptime_monitor_format_background_check_duration(time() - (int) $next_batch);
+    }
     $parts[] = 'legacy hourly: ' . uptime_monitor_format_background_check_schedule_time($next_hourly);
     $parts[] = 'stale over 24h: ' . $stale_count;
+
+    $fallback_text = uptime_monitor_format_background_check_fallback_result($last_fallback_result);
+    if ($fallback_text !== '') {
+        $parts[] = $fallback_text;
+    }
 
     if (defined('DISABLE_WP_CRON') && DISABLE_WP_CRON) {
         $parts[] = 'WP-Cron is disabled; dashboard fallback checks are active while this page is open';
@@ -9168,9 +9218,14 @@ function uptime_monitor_enqueue_disk_graph_script() {
                 }
                 contentNode.innerHTML = payload.data.html;
                 if (payload.data.ran) {
-                    setRefreshStatus("Ran due background batch at " + new Date().toLocaleTimeString() + " (" + (payload.data.checked || 0) + " sites).", false);
+                    var clearedText = payload.data.lock_cleared ? " Cleared a stale lock first." : "";
+                    setRefreshStatus("Ran due background batch at " + new Date().toLocaleTimeString() + " (" + (payload.data.checked || 0) + " sites)." + clearedText, false);
+                } else if (payload.data.reason === "locked") {
+                    setRefreshStatus("Background batch is already running; will retry at the next check.", false);
+                } else if (payload.data.reason === "not_due") {
+                    setRefreshStatus("Checked background schedule at " + new Date().toLocaleTimeString() + "; no batch is due.", false);
                 } else {
-                    setRefreshStatus("Checked background schedule at " + new Date().toLocaleTimeString() + ".", false);
+                    setRefreshStatus("Checked background schedule at " + new Date().toLocaleTimeString() + " (" + (payload.data.reason || "skipped") + ").", false);
                 }
             }).catch(function(error) {
                 setRefreshStatus(error && error.message ? error.message : "Unable to run background check fallback.", true);
@@ -9878,24 +9933,39 @@ function uptime_monitor_schedule_next_hourly_check($delay = null) {
 
 function uptime_monitor_maybe_run_due_site_check_batch($force = false) {
     $next_batch = wp_next_scheduled('uptime_monitor_site_check_batch');
+    $overdue_by = ($next_batch && (int) $next_batch <= time()) ? max(0, time() - (int) $next_batch) : 0;
     if (!$force && $next_batch && (int) $next_batch > time()) {
         return [
-            'ran'     => false,
-            'reason'  => 'not_due',
-            'checked' => 0,
+            'ran'        => false,
+            'reason'     => 'not_due',
+            'checked'    => 0,
+            'overdue_by' => 0,
         ];
     }
 
     $lock_key = 'uptime_monitor_site_check_batch_admin_lock';
-    if (get_transient($lock_key)) {
-        return [
-            'ran'     => false,
-            'reason'  => 'locked',
-            'checked' => 0,
-        ];
+    $lock_value = get_transient($lock_key);
+    $lock_cleared = false;
+    if ($lock_value) {
+        $lock_started = absint($lock_value);
+        $timestamp_like_lock = $lock_started > 1000000000;
+        $lock_is_stale = $timestamp_like_lock && (time() - $lock_started) > (5 * MINUTE_IN_SECONDS);
+        $legacy_lock_is_stale = !$timestamp_like_lock && $overdue_by > (5 * MINUTE_IN_SECONDS);
+
+        if ($lock_is_stale || $legacy_lock_is_stale) {
+            delete_transient($lock_key);
+            $lock_cleared = true;
+        } else {
+            return [
+                'ran'        => false,
+                'reason'     => 'locked',
+                'checked'    => 0,
+                'overdue_by' => $overdue_by,
+            ];
+        }
     }
 
-    set_transient($lock_key, 1, 5 * MINUTE_IN_SECONDS);
+    set_transient($lock_key, time(), 5 * MINUTE_IN_SECONDS);
 
     try {
         $result = uptime_monitor_perform_site_check_batch();
@@ -9907,9 +9977,11 @@ function uptime_monitor_maybe_run_due_site_check_batch($force = false) {
     uptime_monitor_schedule_next_hourly_check();
 
     return [
-        'ran'     => true,
-        'reason'  => 'due',
-        'checked' => isset($result['checked']) ? (int) $result['checked'] : 0,
+        'ran'          => true,
+        'reason'       => 'due',
+        'checked'      => isset($result['checked']) ? (int) $result['checked'] : 0,
+        'overdue_by'   => $overdue_by,
+        'lock_cleared' => $lock_cleared,
     ];
 }
 
@@ -9921,6 +9993,14 @@ function uptime_monitor_ajax_run_due_site_check_batch() {
     check_ajax_referer('uptime_monitor_run_due_site_check_batch', 'nonce');
 
     $run_result = uptime_monitor_maybe_run_due_site_check_batch(false);
+    update_option('uptime_monitor_site_check_fallback_last_result', [
+        'at'           => current_time('timestamp'),
+        'ran'          => !empty($run_result['ran']),
+        'reason'       => isset($run_result['reason']) ? (string) $run_result['reason'] : '',
+        'checked'      => isset($run_result['checked']) ? (int) $run_result['checked'] : 0,
+        'overdue_by'   => isset($run_result['overdue_by']) ? absint($run_result['overdue_by']) : 0,
+        'lock_cleared' => !empty($run_result['lock_cleared']),
+    ]);
     $sites = uptime_monitor_get_mainwp_sites(true);
     $last_checked = get_option('uptime_monitor_last_checked', []);
 
@@ -9933,6 +10013,8 @@ function uptime_monitor_ajax_run_due_site_check_batch() {
         'ran'     => !empty($run_result['ran']),
         'reason'  => isset($run_result['reason']) ? (string) $run_result['reason'] : '',
         'checked' => isset($run_result['checked']) ? (int) $run_result['checked'] : 0,
+        'overdue_by' => isset($run_result['overdue_by']) ? absint($run_result['overdue_by']) : 0,
+        'lock_cleared' => !empty($run_result['lock_cleared']),
     ]);
 }
 add_action('wp_ajax_uptime_monitor_run_due_site_check_batch', 'uptime_monitor_ajax_run_due_site_check_batch');
