@@ -3,7 +3,7 @@
 Plugin Name: Uptime Monitor
 Plugin URI: https://github.com/stronganchor/uptime-monitor/
 Description: A plugin to monitor URLs and report their HTTP status and display server stats.
-Version: 1.1.36
+Version: 1.1.37
 Update URI: https://github.com/stronganchor/uptime-monitor
 Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
@@ -6000,7 +6000,9 @@ function uptime_monitor_get_server_health_report($force_refresh = false) {
         'timeout'     => 8,
         'redirection' => 2,
         'sslverify'   => true,
-        'headers'     => [],
+        'headers'     => [
+            'Cache-Control' => 'no-cache',
+        ],
     ];
 
     if (!empty($header_config['headers']) && is_array($header_config['headers'])) {
@@ -6056,6 +6058,23 @@ function uptime_monitor_get_server_health_report($force_refresh = false) {
     set_transient($cache_key, $payload, uptime_monitor_get_server_health_report_cache_ttl());
     return $payload;
 }
+
+function uptime_monitor_ajax_get_server_health_report() {
+    if (!current_user_can('manage_options')) {
+        wp_send_json_error(['message' => 'You do not have permission to view this data.'], 403);
+    }
+
+    check_ajax_referer('uptime_monitor_server_health_report', 'nonce');
+
+    ob_start();
+    uptime_monitor_render_server_health_report(uptime_monitor_get_server_health_report(true));
+    $html = ob_get_clean();
+
+    wp_send_json_success([
+        'html' => $html,
+    ]);
+}
+add_action('wp_ajax_uptime_monitor_get_server_health_report', 'uptime_monitor_ajax_get_server_health_report');
 
 function uptime_monitor_get_array_path($data, $path, $default = null) {
     $cursor = $data;
@@ -6119,6 +6138,8 @@ function uptime_monitor_render_server_health_time_script() {
                 }
             }
         }
+
+        window.uptimeMonitorFormatLocalTimes = formatLocalTimes;
 
         if (document.readyState === 'loading') {
             document.addEventListener('DOMContentLoaded', formatLocalTimes);
@@ -6213,6 +6234,15 @@ function uptime_monitor_format_server_health_php_fpm_pools($pools) {
     }
 
     return empty($parts) ? 'not reported' : implode('; ', $parts);
+}
+
+function uptime_monitor_render_server_health_report_container($health) {
+    echo '<div id="uptime-monitor-server-health-report-container" data-server-health-refresh="1" data-ajax-url="' . esc_url(admin_url('admin-ajax.php')) . '" data-nonce="' . esc_attr(wp_create_nonce('uptime_monitor_server_health_report')) . '">';
+    echo '<div data-server-health-report-content="1">';
+    uptime_monitor_render_server_health_report($health);
+    echo '</div>';
+    echo '<p class="uptime-monitor-inline-note uptime-monitor-refresh-status" data-server-health-refresh-status="1">Auto-refresh checks this report every minute while the page is open.</p>';
+    echo '</div>';
 }
 
 function uptime_monitor_render_server_health_report($health) {
@@ -7070,6 +7100,20 @@ function uptime_monitor_ajax_get_live_load() {
 }
 add_action('wp_ajax_uptime_monitor_get_live_load', 'uptime_monitor_ajax_get_live_load');
 
+function uptime_monitor_format_background_check_schedule_time($timestamp) {
+    $timestamp = absint($timestamp);
+    if ($timestamp <= 0) {
+        return 'not scheduled';
+    }
+
+    $formatted = wp_date('m/d H:i', $timestamp);
+    if ($timestamp <= time()) {
+        return 'due now (scheduled ' . $formatted . ')';
+    }
+
+    return $formatted;
+}
+
 function uptime_monitor_render_background_check_status($sites, $last_checked) {
     $sites = is_array($sites) ? $sites : [];
     $last_checked = is_array($last_checked) ? $last_checked : [];
@@ -7098,18 +7142,27 @@ function uptime_monitor_render_background_check_status($sites, $last_checked) {
         $parts[] = 'full cycle about ' . $cycle_minutes . ' minutes';
     }
     $parts[] = 'last batch: ' . ($last_run > 0 ? date_i18n('m/d H:i', $last_run) . ' (' . $last_batch_count . ' sites)' : 'never');
-    $parts[] = 'next batch: ' . ($next_batch ? date_i18n('m/d H:i', $next_batch) : 'not scheduled');
-    $parts[] = 'legacy hourly: ' . ($next_hourly ? date_i18n('m/d H:i', $next_hourly) : 'not scheduled');
+    $parts[] = 'next batch: ' . uptime_monitor_format_background_check_schedule_time($next_batch);
+    $parts[] = 'legacy hourly: ' . uptime_monitor_format_background_check_schedule_time($next_hourly);
     $parts[] = 'stale over 24h: ' . $stale_count;
 
     if (defined('DISABLE_WP_CRON') && DISABLE_WP_CRON) {
-        $parts[] = 'WP-Cron is disabled';
+        $parts[] = 'WP-Cron is disabled; dashboard fallback checks are active while this page is open';
     }
     if ($last_error !== '') {
         $parts[] = 'last error: ' . $last_error;
     }
 
     echo '<p class="uptime-monitor-inline-note">' . esc_html(implode(' | ', $parts)) . '</p>';
+}
+
+function uptime_monitor_render_background_check_status_container($sites, $last_checked) {
+    echo '<div id="uptime-monitor-background-check-status" data-background-check-status="1" data-ajax-url="' . esc_url(admin_url('admin-ajax.php')) . '" data-nonce="' . esc_attr(wp_create_nonce('uptime_monitor_run_due_site_check_batch')) . '">';
+    echo '<div data-background-check-status-content="1">';
+    uptime_monitor_render_background_check_status($sites, $last_checked);
+    echo '</div>';
+    echo '<p class="uptime-monitor-inline-note uptime-monitor-refresh-status" data-background-check-refresh-status="1">Dashboard fallback checks for due background batches every minute while the page is open.</p>';
+    echo '</div>';
 }
 
 // Step 4: Display server stats at the top of the Uptime Monitor page
@@ -7141,7 +7194,7 @@ function uptime_monitor_page() {
     // Fetch and display the server stats
     $server_stats = get_whm_server_stats();
     uptime_monitor_render_server_stats($server_stats);
-    uptime_monitor_render_server_health_report(uptime_monitor_get_server_health_report());
+    uptime_monitor_render_server_health_report_container(uptime_monitor_get_server_health_report());
 
     if (isset($_POST['check_all_sites'])) {
         check_admin_referer('uptime_monitor_check_all_sites', 'uptime_monitor_check_all_sites_nonce');
@@ -7241,7 +7294,7 @@ function uptime_monitor_page() {
     echo '<input type="submit" name="check_all_sites" class="button button-primary" value="Check All Sites">';
     echo '</form>';
     echo ' <a href="' . esc_url(admin_url('admin.php?page=uptime-monitor-diagnostics')) . '" class="button button-secondary">Open Diagnostics</a>';
-    uptime_monitor_render_background_check_status($sites, $last_checked);
+    uptime_monitor_render_background_check_status_container($sites, $last_checked);
 
     echo '<h2>MainWP Child Sites</h2>';
     echo '<table class="widefat">';
@@ -8328,6 +8381,12 @@ function uptime_monitor_enqueue_styles() {
             color: #50575e;
             line-height: 1.45;
         }
+        .uptime-monitor-refresh-status {
+            margin: 6px 0 0;
+        }
+        .uptime-monitor-refresh-status.is-error {
+            color: #991b1b;
+        }
         .uptime-monitor-report-stats {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
@@ -8520,6 +8579,8 @@ function uptime_monitor_enqueue_disk_graph_script() {
 
     $ajax_url = wp_json_encode(admin_url('admin-ajax.php'));
     $load_nonce = wp_json_encode(wp_create_nonce('uptime_monitor_live_load'));
+    $server_health_nonce = wp_json_encode(wp_create_nonce('uptime_monitor_server_health_report'));
+    $site_check_nonce = wp_json_encode(wp_create_nonce('uptime_monitor_run_due_site_check_batch'));
 
     echo '<script>
     (function() {
@@ -8968,6 +9029,166 @@ function uptime_monitor_enqueue_disk_graph_script() {
         document.addEventListener("visibilitychange", function() {
             if (document.visibilityState === "visible") {
                 fetchLiveLoad();
+            }
+        });
+    })();
+    </script>';
+
+    echo '<script>
+    (function() {
+        var container = document.querySelector("[data-server-health-refresh=\"1\"]");
+        if (!container) {
+            return;
+        }
+
+        var ajaxUrl = container.getAttribute("data-ajax-url") || ' . $ajax_url . ';
+        var nonce = container.getAttribute("data-nonce") || ' . $server_health_nonce . ';
+        var contentNode = container.querySelector("[data-server-health-report-content=\"1\"]") || container;
+        var statusNode = container.querySelector("[data-server-health-refresh-status=\"1\"]");
+        var refreshMs = 60000;
+        var inFlight = false;
+
+        var setRefreshStatus = function(message, isError) {
+            if (!statusNode) {
+                return;
+            }
+            statusNode.textContent = message || "";
+            statusNode.classList.toggle("is-error", !!isError);
+        };
+
+        var refreshLocalTimes = function() {
+            if (window.uptimeMonitorFormatLocalTimes && typeof window.uptimeMonitorFormatLocalTimes === "function") {
+                window.uptimeMonitorFormatLocalTimes();
+            }
+        };
+
+        var fetchServerHealth = function() {
+            if (inFlight) {
+                return;
+            }
+            inFlight = true;
+
+            var formData = new URLSearchParams();
+            formData.append("action", "uptime_monitor_get_server_health_report");
+            formData.append("nonce", nonce);
+
+            fetch(ajaxUrl, {
+                method: "POST",
+                credentials: "same-origin",
+                headers: {
+                    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"
+                },
+                body: formData.toString()
+            }).then(function(response) {
+                if (!response.ok) {
+                    throw new Error("Server health refresh returned HTTP " + response.status + ".");
+                }
+                return response.json();
+            }).then(function(payload) {
+                if (!payload || !payload.success || !payload.data || typeof payload.data.html !== "string") {
+                    throw new Error("Server health refresh returned an unexpected response.");
+                }
+                contentNode.innerHTML = payload.data.html;
+                setRefreshStatus("Last refreshed " + new Date().toLocaleTimeString() + ".", false);
+                refreshLocalTimes();
+            }).catch(function(error) {
+                setRefreshStatus(error && error.message ? error.message : "Unable to auto-refresh server health report.", true);
+            }).finally(function() {
+                inFlight = false;
+            });
+        };
+
+        window.setTimeout(function() {
+            if (document.visibilityState === "visible") {
+                fetchServerHealth();
+            }
+        }, 5000);
+
+        window.setInterval(function() {
+            if (document.visibilityState === "visible") {
+                fetchServerHealth();
+            }
+        }, refreshMs);
+
+        document.addEventListener("visibilitychange", function() {
+            if (document.visibilityState === "visible") {
+                fetchServerHealth();
+            }
+        });
+    })();
+    </script>';
+
+    echo '<script>
+    (function() {
+        var container = document.querySelector("[data-background-check-status=\"1\"]");
+        if (!container) {
+            return;
+        }
+
+        var ajaxUrl = container.getAttribute("data-ajax-url") || ' . $ajax_url . ';
+        var nonce = container.getAttribute("data-nonce") || ' . $site_check_nonce . ';
+        var contentNode = container.querySelector("[data-background-check-status-content=\"1\"]") || container;
+        var statusNode = container.querySelector("[data-background-check-refresh-status=\"1\"]");
+        var refreshMs = 60 * 1000;
+        var inFlight = false;
+
+        var setRefreshStatus = function(message, isError) {
+            if (!statusNode) {
+                return;
+            }
+            statusNode.textContent = message || "";
+            statusNode.classList.toggle("is-error", !!isError);
+        };
+
+        var runDueBatch = function() {
+            if (inFlight) {
+                return;
+            }
+            inFlight = true;
+
+            var formData = new URLSearchParams();
+            formData.append("action", "uptime_monitor_run_due_site_check_batch");
+            formData.append("nonce", nonce);
+
+            fetch(ajaxUrl, {
+                method: "POST",
+                credentials: "same-origin",
+                headers: {
+                    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"
+                },
+                body: formData.toString()
+            }).then(function(response) {
+                if (!response.ok) {
+                    throw new Error("Background check request returned HTTP " + response.status + ".");
+                }
+                return response.json();
+            }).then(function(payload) {
+                if (!payload || !payload.success || !payload.data || typeof payload.data.html !== "string") {
+                    throw new Error("Background check request returned an unexpected response.");
+                }
+                contentNode.innerHTML = payload.data.html;
+                if (payload.data.ran) {
+                    setRefreshStatus("Ran due background batch at " + new Date().toLocaleTimeString() + " (" + (payload.data.checked || 0) + " sites).", false);
+                } else {
+                    setRefreshStatus("Checked background schedule at " + new Date().toLocaleTimeString() + ".", false);
+                }
+            }).catch(function(error) {
+                setRefreshStatus(error && error.message ? error.message : "Unable to run background check fallback.", true);
+            }).finally(function() {
+                inFlight = false;
+            });
+        };
+
+        window.setTimeout(runDueBatch, 3000);
+        window.setInterval(function() {
+            if (document.visibilityState === "visible") {
+                runDueBatch();
+            }
+        }, refreshMs);
+
+        document.addEventListener("visibilitychange", function() {
+            if (document.visibilityState === "visible") {
+                runDueBatch();
             }
         });
     })();
@@ -9638,6 +9859,83 @@ function uptime_monitor_perform_site_check_batch($batch_size = null) {
         'failed'  => $failed_sites,
     ];
 }
+
+function uptime_monitor_schedule_next_site_check_batch($delay = null) {
+    $delay = $delay === null ? (5 * MINUTE_IN_SECONDS) : absint($delay);
+    $delay = max(60, $delay);
+
+    wp_clear_scheduled_hook('uptime_monitor_site_check_batch');
+    wp_schedule_event(time() + $delay, 'uptime_monitor_every_five_minutes', 'uptime_monitor_site_check_batch');
+}
+
+function uptime_monitor_schedule_next_hourly_check($delay = null) {
+    $delay = $delay === null ? HOUR_IN_SECONDS : absint($delay);
+    $delay = max(60, $delay);
+
+    wp_clear_scheduled_hook('uptime_monitor_hourly_check');
+    wp_schedule_event(time() + $delay, 'hourly', 'uptime_monitor_hourly_check');
+}
+
+function uptime_monitor_maybe_run_due_site_check_batch($force = false) {
+    $next_batch = wp_next_scheduled('uptime_monitor_site_check_batch');
+    if (!$force && $next_batch && (int) $next_batch > time()) {
+        return [
+            'ran'     => false,
+            'reason'  => 'not_due',
+            'checked' => 0,
+        ];
+    }
+
+    $lock_key = 'uptime_monitor_site_check_batch_admin_lock';
+    if (get_transient($lock_key)) {
+        return [
+            'ran'     => false,
+            'reason'  => 'locked',
+            'checked' => 0,
+        ];
+    }
+
+    set_transient($lock_key, 1, 5 * MINUTE_IN_SECONDS);
+
+    try {
+        $result = uptime_monitor_perform_site_check_batch();
+    } finally {
+        delete_transient($lock_key);
+    }
+
+    uptime_monitor_schedule_next_site_check_batch();
+    uptime_monitor_schedule_next_hourly_check();
+
+    return [
+        'ran'     => true,
+        'reason'  => 'due',
+        'checked' => isset($result['checked']) ? (int) $result['checked'] : 0,
+    ];
+}
+
+function uptime_monitor_ajax_run_due_site_check_batch() {
+    if (!current_user_can('manage_options')) {
+        wp_send_json_error(['message' => 'You do not have permission to run checks.'], 403);
+    }
+
+    check_ajax_referer('uptime_monitor_run_due_site_check_batch', 'nonce');
+
+    $run_result = uptime_monitor_maybe_run_due_site_check_batch(false);
+    $sites = uptime_monitor_get_mainwp_sites(true);
+    $last_checked = get_option('uptime_monitor_last_checked', []);
+
+    ob_start();
+    uptime_monitor_render_background_check_status($sites, $last_checked);
+    $html = ob_get_clean();
+
+    wp_send_json_success([
+        'html'    => $html,
+        'ran'     => !empty($run_result['ran']),
+        'reason'  => isset($run_result['reason']) ? (string) $run_result['reason'] : '',
+        'checked' => isset($run_result['checked']) ? (int) $run_result['checked'] : 0,
+    ]);
+}
+add_action('wp_ajax_uptime_monitor_run_due_site_check_batch', 'uptime_monitor_ajax_run_due_site_check_batch');
 
 function uptime_monitor_capture_load_sample() {
     $whm_user      = get_option('uptime_monitor_whm_user');
