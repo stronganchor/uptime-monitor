@@ -3,7 +3,7 @@
 Plugin Name: Uptime Monitor
 Plugin URI: https://github.com/stronganchor/uptime-monitor/
 Description: A plugin to monitor URLs and report their HTTP status and display server stats.
-Version: 1.1.38
+Version: 1.1.39
 Update URI: https://github.com/stronganchor/uptime-monitor
 Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
@@ -9131,6 +9131,9 @@ function uptime_monitor_enqueue_disk_graph_script() {
                 body: formData.toString()
             }).then(function(response) {
                 if (!response.ok) {
+                    if (response.status === 403) {
+                        throw new Error("Server health auto-refresh token expired or is no longer authorized. Refresh this page to resume auto-refresh.");
+                    }
                     throw new Error("Server health refresh returned HTTP " + response.status + ".");
                 }
                 return response.json();
@@ -9209,6 +9212,9 @@ function uptime_monitor_enqueue_disk_graph_script() {
                 body: formData.toString()
             }).then(function(response) {
                 if (!response.ok) {
+                    if (response.status === 403) {
+                        throw new Error("Background check token expired or is no longer authorized. Refresh this page to resume dashboard fallback checks.");
+                    }
                     throw new Error("Background check request returned HTTP " + response.status + ".");
                 }
                 return response.json();
