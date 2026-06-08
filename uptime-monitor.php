@@ -3,7 +3,7 @@
 Plugin Name: Uptime Monitor
 Plugin URI: https://github.com/stronganchor/uptime-monitor/
 Description: A plugin to monitor URLs and report their HTTP status and display server stats.
-Version: 1.1.39
+Version: 1.1.40
 Update URI: https://github.com/stronganchor/uptime-monitor
 Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
@@ -6236,6 +6236,295 @@ function uptime_monitor_format_server_health_php_fpm_pools($pools) {
     return empty($parts) ? 'not reported' : implode('; ', $parts);
 }
 
+function uptime_monitor_report_clean_text($value) {
+    if (is_array($value) || is_object($value)) {
+        return '';
+    }
+
+    return trim((string) preg_replace('/\s+/', ' ', wp_strip_all_tags((string) $value)));
+}
+
+function uptime_monitor_format_report_timestamp($timestamp) {
+    $timestamp = is_numeric($timestamp) ? (int) $timestamp : 0;
+    if ($timestamp <= 0) {
+        return 'unknown';
+    }
+
+    return wp_date('Y-m-d H:i T', $timestamp);
+}
+
+function uptime_monitor_render_copy_text_payload($section, $text) {
+    $section = uptime_monitor_report_clean_text($section);
+    $text = trim((string) $text);
+
+    if ($section === '' || $text === '') {
+        return;
+    }
+
+    echo '<script type="application/json" data-uptime-monitor-copy-text="' . esc_attr($section) . '">';
+    echo wp_json_encode($text, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
+    echo '</script>';
+}
+
+function uptime_monitor_build_server_overview_copy_text($stats) {
+    $stats = is_array($stats) ? $stats : [];
+    $lines = ['Server Overview'];
+
+    if (!empty($stats['error'])) {
+        $lines[] = 'Error: ' . uptime_monitor_report_clean_text($stats['error']);
+        return implode("\n", $lines);
+    }
+
+    $load_average = (isset($stats['load_average']) && is_array($stats['load_average'])) ? $stats['load_average'] : null;
+    $load_trend = (isset($stats['load_trend']) && is_array($stats['load_trend'])) ? $stats['load_trend'] : [];
+    $cpu_cores = isset($stats['cpu_cores']) ? (int) $stats['cpu_cores'] : 0;
+    $cpu_cores = $cpu_cores > 0 ? $cpu_cores : null;
+    $cpu_source = isset($stats['cpu_source']) ? sanitize_key($stats['cpu_source']) : 'unknown';
+
+    $load_one = $load_average ? uptime_monitor_parse_load_value($load_average['one'] ?? null) : null;
+    $load_five = $load_average ? uptime_monitor_parse_load_value($load_average['five'] ?? null) : null;
+    $load_fifteen = $load_average ? uptime_monitor_parse_load_value($load_average['fifteen'] ?? null) : null;
+    $load_level = uptime_monitor_get_load_level($load_five, $cpu_cores);
+
+    $lines[] = 'Load status: ' . uptime_monitor_get_load_label($load_level);
+    $lines[] = 'Load averages: 1m ' . uptime_monitor_format_load_value($load_one) . ', 5m ' . uptime_monitor_format_load_value($load_five) . ', 15m ' . uptime_monitor_format_load_value($load_fifteen);
+
+    $trend_avg = isset($load_trend['avg_five']) ? uptime_monitor_parse_load_value($load_trend['avg_five']) : null;
+    $trend_peak = isset($load_trend['peak_five']) ? uptime_monitor_parse_load_value($load_trend['peak_five']) : null;
+    $trend_delta = isset($load_trend['delta_pct']) && is_numeric($load_trend['delta_pct']) ? (float) $load_trend['delta_pct'] : null;
+    $trend_parts = [];
+    if ($trend_avg !== null) {
+        $trend_parts[] = 'average ' . uptime_monitor_format_load_value($trend_avg);
+    }
+    if ($trend_peak !== null) {
+        $trend_parts[] = 'peak ' . uptime_monitor_format_load_value($trend_peak);
+    }
+    if ($trend_delta !== null) {
+        $trend_parts[] = 'delta ' . ($trend_delta >= 0 ? '+' : '') . number_format($trend_delta, 0) . '%';
+    }
+    if (!empty($trend_parts)) {
+        $trend_window_label = !empty($load_trend['window_label']) ? (string) $load_trend['window_label'] : '24h';
+        $lines[] = 'Load trend (' . uptime_monitor_report_clean_text($trend_window_label) . '): ' . implode(', ', $trend_parts);
+    }
+
+    $cpu_source_text = ($cpu_source === 'manual') ? 'manual' : (($cpu_source === 'auto') ? 'auto' : 'unknown');
+    $lines[] = 'CPU: ' . ($cpu_cores ? ($cpu_cores . ' cores (' . $cpu_source_text . ')') : 'CPU cores unknown');
+
+    if (!empty($stats['load_warning'])) {
+        $lines[] = 'Load warning: ' . uptime_monitor_report_clean_text($stats['load_warning']);
+    }
+
+    $identity = isset($stats['server_identity']) && is_array($stats['server_identity']) ? $stats['server_identity'] : [];
+    $hostname = isset($identity['hostname']) ? uptime_monitor_report_clean_text($identity['hostname']) : '';
+    $version = isset($identity['version']) ? uptime_monitor_report_clean_text($identity['version']) : '';
+    $identity_warning = isset($identity['warning']) ? uptime_monitor_report_clean_text($identity['warning']) : '';
+
+    if ($hostname !== '') {
+        $lines[] = 'Hostname: ' . $hostname;
+    }
+    if ($version !== '') {
+        $lines[] = 'WHM version: ' . $version;
+    }
+    if ($identity_warning !== '') {
+        $lines[] = 'Identity warning: ' . $identity_warning;
+    }
+
+    $services = isset($stats['services']) && is_array($stats['services']) ? $stats['services'] : [];
+    $services_warning = !empty($stats['services_warning']) ? uptime_monitor_report_clean_text($stats['services_warning']) : '';
+    $services_running = 0;
+    $services_down = 0;
+    foreach ($services as $service) {
+        if (!is_array($service)) {
+            continue;
+        }
+        if (($service['running'] ?? null) === true) {
+            $services_running++;
+        } elseif (($service['running'] ?? null) === false) {
+            $services_down++;
+        }
+    }
+
+    if (!empty($services)) {
+        $lines[] = 'Services: ' . $services_running . ' running' . ($services_down > 0 ? ', ' . $services_down . ' down' : '');
+        foreach ($services as $service) {
+            if (!is_array($service)) {
+                continue;
+            }
+            $service_name = isset($service['name']) ? uptime_monitor_report_clean_text($service['name']) : 'Service';
+            $service_status = 'Unknown';
+            if (($service['running'] ?? null) === true) {
+                $service_status = 'Running';
+            } elseif (($service['running'] ?? null) === false) {
+                $service_status = 'Down';
+            }
+
+            $line = '- ' . $service_name . ': ' . $service_status;
+            if (!empty($service['details'])) {
+                $line .= ' - ' . uptime_monitor_report_clean_text($service['details']);
+            }
+            $lines[] = $line;
+        }
+    } else {
+        $lines[] = 'Services: unavailable';
+    }
+
+    if ($services_warning !== '') {
+        $lines[] = 'Services warning: ' . $services_warning;
+    }
+
+    return implode("\n", $lines);
+}
+
+function uptime_monitor_build_disk_usage_copy_text($stats) {
+    $stats = is_array($stats) ? $stats : [];
+    $lines = ['Server Disk Usage'];
+
+    if (!empty($stats['error'])) {
+        $lines[] = 'Error: ' . uptime_monitor_report_clean_text($stats['error']);
+        return implode("\n", $lines);
+    }
+
+    if (empty($stats['server_disk']) || empty($stats['server_disk']['total_gb'])) {
+        $lines[] = 'Server disk usage is currently unavailable.';
+        return implode("\n", $lines);
+    }
+
+    $disk = $stats['server_disk'];
+    $graph_data = uptime_monitor_build_disk_graph_data($stats);
+    $segments = isset($graph_data['segments']) && is_array($graph_data['segments']) ? $graph_data['segments'] : [];
+
+    if (!empty($stats['warning'])) {
+        $lines[] = 'Warning: ' . uptime_monitor_report_clean_text($stats['warning']);
+    }
+    if (!empty($stats['account_metrics_warning'])) {
+        $lines[] = 'Account metrics warning: ' . uptime_monitor_report_clean_text($stats['account_metrics_warning']);
+    }
+
+    $lines[] = 'Total: ' . number_format((float) $disk['total_gb'], 2) . ' GB';
+    $lines[] = 'Used: ' . number_format((float) $disk['used_gb'], 2) . ' GB';
+    $lines[] = 'Free: ' . number_format((float) $disk['free_gb'], 2) . ' GB';
+
+    if (!empty($segments)) {
+        $lines[] = 'Disk segments:';
+        foreach ($segments as $segment) {
+            if (!is_array($segment)) {
+                continue;
+            }
+
+            $name = isset($segment['name']) ? uptime_monitor_report_clean_text($segment['name']) : 'Segment';
+            $value_mb = isset($segment['value_mb']) && is_numeric($segment['value_mb']) ? (float) $segment['value_mb'] : 0.0;
+            $pct = isset($segment['pct']) && is_numeric($segment['pct']) ? (float) $segment['pct'] : 0.0;
+            $line = '- ' . $name . ': ' . uptime_monitor_format_mb($value_mb) . ' (' . number_format($pct, 1) . '%)';
+
+            $domain = isset($segment['domain']) ? uptime_monitor_report_clean_text($segment['domain']) : '';
+            if ($domain !== '') {
+                $line .= ' | domain ' . $domain;
+            }
+
+            if (isset($segment['type']) && $segment['type'] === 'account') {
+                $bandwidth_used_mb = (isset($segment['bandwidth_used_mb']) && is_numeric($segment['bandwidth_used_mb'])) ? (float) $segment['bandwidth_used_mb'] : null;
+                $bandwidth_limit_mb = (isset($segment['bandwidth_limit_mb']) && is_numeric($segment['bandwidth_limit_mb'])) ? (float) $segment['bandwidth_limit_mb'] : null;
+                $inodes_used = (isset($segment['inodes_used']) && is_numeric($segment['inodes_used'])) ? (int) $segment['inodes_used'] : null;
+                $inodes_limit = (isset($segment['inodes_limit']) && is_numeric($segment['inodes_limit'])) ? (int) $segment['inodes_limit'] : null;
+
+                if ($bandwidth_used_mb !== null || $bandwidth_limit_mb !== null) {
+                    $line .= ' | ' . uptime_monitor_format_bandwidth_summary($bandwidth_used_mb, $bandwidth_limit_mb);
+                }
+                if ($inodes_used !== null || $inodes_limit !== null) {
+                    $line .= ' | ' . uptime_monitor_format_inode_summary($inodes_used, $inodes_limit);
+                }
+            }
+
+            $lines[] = $line;
+        }
+    }
+
+    if (!empty($graph_data['note'])) {
+        $lines[] = 'Note: ' . uptime_monitor_report_clean_text($graph_data['note']);
+    }
+
+    return implode("\n", $lines);
+}
+
+function uptime_monitor_build_server_health_copy_text($health) {
+    if (empty($health['configured'])) {
+        return '';
+    }
+
+    $lines = ['Private Server Health Report'];
+
+    if (empty($health['ok']) || !is_array($health['data'])) {
+        $lines[] = 'Status: UNREACHABLE - Unable to fetch the private server health report.';
+        $lines[] = 'Fetched: ' . uptime_monitor_format_report_timestamp($health['fetched_at'] ?? 0);
+        if (!empty($health['error'])) {
+            $lines[] = 'Error: ' . uptime_monitor_report_clean_text($health['error']);
+        }
+        $request_header_name = isset($health['request_header_name']) ? uptime_monitor_report_clean_text($health['request_header_name']) : '';
+        if ($request_header_name !== '') {
+            $lines[] = 'Configured request header: ' . $request_header_name;
+        }
+
+        return implode("\n", $lines);
+    }
+
+    $report = $health['data'];
+    $status = uptime_monitor_get_array_path($report, ['status'], []);
+    $level_raw = is_array($status) && isset($status['level']) ? (string) $status['level'] : 'UNKNOWN';
+    $level_class = uptime_monitor_normalize_server_health_level($level_raw);
+    $summary = is_array($status) && isset($status['summary']) ? uptime_monitor_report_clean_text($status['summary']) : 'No summary was included.';
+    $generated_epoch = uptime_monitor_get_array_path($report, ['generated_epoch'], 0);
+    $is_stale = is_numeric($generated_epoch) && (time() - (int) $generated_epoch) > (15 * MINUTE_IN_SECONDS);
+
+    if ($is_stale && ($level_class === 'ok' || $level_class === 'unknown')) {
+        $level_raw = 'STALE';
+    }
+
+    $lines[] = 'Status: ' . uptime_monitor_report_clean_text($level_raw) . ' - ' . $summary;
+    $lines[] = 'Generated: ' . uptime_monitor_format_report_timestamp($generated_epoch);
+
+    $reasons = is_array($status) && isset($status['reasons']) && is_array($status['reasons']) ? $status['reasons'] : [];
+    if (!empty($reasons)) {
+        $lines[] = 'Reasons:';
+        foreach (array_slice($reasons, 0, 5) as $reason) {
+            if (is_scalar($reason)) {
+                $reason_text = uptime_monitor_report_clean_text($reason);
+                if ($reason_text !== '') {
+                    $lines[] = '- ' . $reason_text;
+                }
+            }
+        }
+    }
+
+    $load_five = uptime_monitor_get_array_path($report, ['metrics', 'load', 'five'], null);
+    $load_per_core = uptime_monitor_get_array_path($report, ['metrics', 'load', 'five_per_core'], null);
+    $memory_available_pct = uptime_monitor_get_array_path($report, ['metrics', 'memory', 'available_pct'], null);
+    $web_sockets = uptime_monitor_get_array_path($report, ['apache', 'sockets', 'total_active'], null);
+    $backlog = uptime_monitor_format_server_health_backlog(uptime_monitor_get_array_path($report, ['apache', 'sockets', 'listen'], []));
+    $saturation_counts = uptime_monitor_format_server_health_counts(uptime_monitor_get_array_path($report, ['apache', 'errors', 'saturation_counts'], []));
+    $csf_blocks = uptime_monitor_get_array_path($report, ['firewall', 'csf', 'count'], null);
+    $php_fpm_workers = uptime_monitor_get_array_path($report, ['php_fpm', 'total_workers'], null);
+    $php_fpm_pools = uptime_monitor_format_server_health_php_fpm_pools(uptime_monitor_get_array_path($report, ['php_fpm', 'pools'], []));
+    $php_fpm_errors = uptime_monitor_format_server_health_counts(uptime_monitor_get_array_path($report, ['php_fpm', 'errors', 'counts'], []));
+
+    $lines[] = '5m load: ' . ($load_five === null ? 'unknown' : $load_five) . ($load_per_core === null ? '' : ' (' . $load_per_core . '/core)');
+    $lines[] = 'Memory available: ' . ($memory_available_pct === null ? 'unknown' : $memory_available_pct . '%');
+    $lines[] = 'Listen backlog: ' . $backlog;
+    $lines[] = 'Active web sockets: ' . ($web_sockets === null ? 'unknown' : $web_sockets);
+    $lines[] = 'Apache saturation errors: ' . $saturation_counts;
+    $lines[] = 'CSF temp blocks: ' . ($csf_blocks === null ? 'unknown' : $csf_blocks);
+    $lines[] = 'PHP-FPM workers: ' . ($php_fpm_workers === null ? 'unknown' : $php_fpm_workers) . ' (' . $php_fpm_pools . ')';
+    $lines[] = 'PHP-FPM recent errors: ' . $php_fpm_errors;
+
+    return implode("\n", $lines);
+}
+
+function uptime_monitor_render_server_report_copy_controls() {
+    echo '<div class="uptime-monitor-report-actions uptime-monitor-server-report-actions">';
+    echo '<button type="button" class="button button-secondary" data-uptime-monitor-copy-server-report="1">Copy Server Report</button>';
+    echo '<span class="uptime-monitor-inline-note uptime-monitor-copy-status" data-uptime-monitor-copy-server-report-status>Ready to copy server report.</span>';
+    echo '</div>';
+}
+
 function uptime_monitor_render_server_health_report_container($health) {
     echo '<div id="uptime-monitor-server-health-report-container" data-server-health-refresh="1" data-ajax-url="' . esc_url(admin_url('admin-ajax.php')) . '" data-nonce="' . esc_attr(wp_create_nonce('uptime_monitor_server_health_report')) . '">';
     echo '<div data-server-health-report-content="1">';
@@ -6249,6 +6538,8 @@ function uptime_monitor_render_server_health_report($health) {
     if (empty($health['configured'])) {
         return;
     }
+
+    uptime_monitor_render_copy_text_payload('Private Server Health Report', uptime_monitor_build_server_health_copy_text($health));
 
     echo '<h2>Private Server Health Report</h2>';
     echo '<div class="uptime-monitor-server-health-report">';
@@ -6328,6 +6619,8 @@ function uptime_monitor_render_server_health_report($health) {
 
 function uptime_monitor_render_server_stats($stats) {
     if (!empty($stats['error'])) {
+        uptime_monitor_render_copy_text_payload('Server Overview', uptime_monitor_build_server_overview_copy_text($stats));
+        uptime_monitor_render_copy_text_payload('Server Disk Usage', uptime_monitor_build_disk_usage_copy_text($stats));
         echo '<p>' . esc_html($stats['error']) . '</p>';
         return;
     }
@@ -6386,6 +6679,8 @@ function uptime_monitor_render_server_stats($stats) {
     } elseif ($hostname_length > 28) {
         $hostname_value_class .= ' is-long';
     }
+
+    uptime_monitor_render_copy_text_payload('Server Overview', uptime_monitor_build_server_overview_copy_text($stats));
 
     echo '<h2>Server Overview</h2>';
 
@@ -6542,6 +6837,8 @@ function uptime_monitor_render_server_stats($stats) {
             echo '<p class="uptime-monitor-disk-warning">' . esc_html($identity_warning) . '</p>';
         }
     }
+
+    uptime_monitor_render_copy_text_payload('Server Disk Usage', uptime_monitor_build_disk_usage_copy_text($stats));
 
     echo '<h2>Server Disk Usage</h2>';
 
@@ -7137,11 +7434,16 @@ function uptime_monitor_format_background_check_fallback_result($result) {
 
     $reason = isset($result['reason']) ? (string) $result['reason'] : '';
     $checked = isset($result['checked']) ? absint($result['checked']) : 0;
+    $priority_checked = isset($result['priority_checked']) ? absint($result['priority_checked']) : 0;
     $at = absint($result['at']);
     $time_text = $at > 0 ? date_i18n('m/d H:i', $at) : 'unknown time';
 
     if (!empty($result['ran'])) {
-        return 'fallback ran ' . $time_text . ' (' . $checked . ' sites)';
+        $checked_text = $checked . ' sites';
+        if ($priority_checked > 0) {
+            $checked_text .= '; ' . $priority_checked . ' priority ' . ($priority_checked === 1 ? 'retry' : 'retries');
+        }
+        return 'fallback ran ' . $time_text . ' (' . $checked_text . ')';
     }
 
     if ($reason === 'locked') {
@@ -7163,10 +7465,12 @@ function uptime_monitor_render_background_check_status($sites, $last_checked) {
     $cycle_minutes = $site_count > 0 ? (int) ceil($site_count / $batch_size) * 5 : 0;
     $last_run = absint(get_option('uptime_monitor_site_check_last_run', 0));
     $last_batch_count = absint(get_option('uptime_monitor_site_check_last_batch_count', 0));
+    $last_priority_count = absint(get_option('uptime_monitor_site_check_last_priority_count', 0));
     $last_error = trim((string) get_option('uptime_monitor_site_check_last_error', ''));
     $last_fallback_result = get_option('uptime_monitor_site_check_fallback_last_result', []);
     $next_batch = wp_next_scheduled('uptime_monitor_site_check_batch');
     $next_hourly = wp_next_scheduled('uptime_monitor_hourly_check');
+    $priority_retry_count = count(uptime_monitor_get_site_check_priority_retry_sites($sites));
     $now = current_time('timestamp');
     $stale_threshold = $now - DAY_IN_SECONDS;
     $stale_count = 0;
@@ -7183,7 +7487,17 @@ function uptime_monitor_render_background_check_status($sites, $last_checked) {
     if ($cycle_minutes > 0) {
         $parts[] = 'full cycle about ' . $cycle_minutes . ' minutes';
     }
-    $parts[] = 'last batch: ' . ($last_run > 0 ? date_i18n('m/d H:i', $last_run) . ' (' . $last_batch_count . ' sites)' : 'never');
+    if ($priority_retry_count > 0) {
+        $parts[] = 'priority retries: ' . $priority_retry_count . ' down ' . ($priority_retry_count === 1 ? 'site' : 'sites');
+    }
+    $last_batch_text = $last_run > 0 ? date_i18n('m/d H:i', $last_run) . ' (' . $last_batch_count . ' sites' : 'never';
+    if ($last_run > 0 && $last_priority_count > 0) {
+        $last_batch_text .= '; ' . $last_priority_count . ' priority ' . ($last_priority_count === 1 ? 'retry' : 'retries');
+    }
+    if ($last_run > 0) {
+        $last_batch_text .= ')';
+    }
+    $parts[] = 'last batch: ' . $last_batch_text;
     $parts[] = 'next batch: ' . uptime_monitor_format_background_check_schedule_time($next_batch);
     if ($next_batch && (int) $next_batch <= time()) {
         $parts[] = 'overdue by ' . uptime_monitor_format_background_check_duration(time() - (int) $next_batch);
@@ -7223,6 +7537,7 @@ function uptime_monitor_page() {
 
     echo '<div class="wrap">';
     echo '<h1>Uptime Monitor</h1>';
+    uptime_monitor_render_server_report_copy_controls();
 
     if (isset($_POST['save_cpu_cores']) || isset($_POST['clear_cpu_cores'])) {
         check_admin_referer('uptime_monitor_save_cpu_cores', 'uptime_monitor_save_cpu_cores_nonce');
@@ -8437,6 +8752,9 @@ function uptime_monitor_enqueue_styles() {
         .uptime-monitor-refresh-status.is-error {
             color: #991b1b;
         }
+        .uptime-monitor-copy-status.is-error {
+            color: #991b1b;
+        }
         .uptime-monitor-report-stats {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
@@ -9225,7 +9543,8 @@ function uptime_monitor_enqueue_disk_graph_script() {
                 contentNode.innerHTML = payload.data.html;
                 if (payload.data.ran) {
                     var clearedText = payload.data.lock_cleared ? " Cleared a stale lock first." : "";
-                    setRefreshStatus("Ran due background batch at " + new Date().toLocaleTimeString() + " (" + (payload.data.checked || 0) + " sites)." + clearedText, false);
+                    var priorityText = payload.data.priority_checked ? "; " + payload.data.priority_checked + " priority " + (payload.data.priority_checked === 1 ? "retry" : "retries") : "";
+                    setRefreshStatus("Ran due background batch at " + new Date().toLocaleTimeString() + " (" + (payload.data.checked || 0) + " sites" + priorityText + ")." + clearedText, false);
                 } else if (payload.data.reason === "locked") {
                     setRefreshStatus("Background batch is already running; will retry at the next check.", false);
                 } else if (payload.data.reason === "not_due") {
@@ -9251,6 +9570,102 @@ function uptime_monitor_enqueue_disk_graph_script() {
             if (document.visibilityState === "visible") {
                 runDueBatch();
             }
+        });
+    })();
+    </script>';
+
+    echo '<script>
+    (function() {
+        var button = document.querySelector("[data-uptime-monitor-copy-server-report=\"1\"]");
+        var statusNode = document.querySelector("[data-uptime-monitor-copy-server-report-status]");
+        if (!button) {
+            return;
+        }
+
+        var setStatus = function(message, isError) {
+            if (!statusNode) {
+                return;
+            }
+            statusNode.textContent = message || "";
+            statusNode.classList.toggle("is-error", !!isError);
+        };
+
+        var copyTextToClipboard = function(text) {
+            if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+                return navigator.clipboard.writeText(text);
+            }
+
+            return new Promise(function(resolve, reject) {
+                var textArea = document.createElement("textarea");
+                textArea.value = text;
+                textArea.setAttribute("readonly", "readonly");
+                textArea.style.position = "fixed";
+                textArea.style.top = "-9999px";
+                document.body.appendChild(textArea);
+                textArea.focus();
+                textArea.select();
+
+                try {
+                    var copied = document.execCommand("copy");
+                    document.body.removeChild(textArea);
+                    if (copied) {
+                        resolve();
+                        return;
+                    }
+                } catch (error) {
+                    document.body.removeChild(textArea);
+                    reject(error);
+                    return;
+                }
+
+                reject(new Error("Clipboard copy failed."));
+            });
+        };
+
+        var readSectionText = function(node) {
+            var value = "";
+            try {
+                value = JSON.parse(node.textContent || "\"\"");
+            } catch (error) {
+                value = "";
+            }
+
+            return typeof value === "string" ? value.trim() : "";
+        };
+
+        var buildReportText = function() {
+            var sections = [];
+            var payloadNodes = document.querySelectorAll("script[type=\"application/json\"][data-uptime-monitor-copy-text]");
+            payloadNodes.forEach(function(node) {
+                var sectionText = readSectionText(node);
+                if (sectionText) {
+                    sections.push(sectionText);
+                }
+            });
+
+            if (!sections.length) {
+                return "";
+            }
+
+            return "Uptime Monitor Server Report\nCopied: " + new Date().toLocaleString() + "\nPage: " + window.location.href + "\n\n" + sections.join("\n\n");
+        };
+
+        button.addEventListener("click", function() {
+            var reportText = buildReportText();
+            if (!reportText) {
+                setStatus("No server report sections are available to copy.", true);
+                return;
+            }
+
+            button.disabled = true;
+            setStatus("Copying server report...", false);
+            copyTextToClipboard(reportText).then(function() {
+                setStatus("Server report copied to clipboard.", false);
+            }).catch(function() {
+                setStatus("Clipboard copy failed in this browser.", true);
+            }).finally(function() {
+                button.disabled = false;
+            });
         });
     })();
     </script>';
@@ -9723,6 +10138,49 @@ function uptime_monitor_result_is_down($result) {
     return (strpos($status, 'Error') !== false || $keyword_match === 'No match found');
 }
 
+function uptime_monitor_normalize_site_url_list($sites) {
+    $site_urls = [];
+    $seen = [];
+
+    foreach ((array) $sites as $site) {
+        if (is_array($site)) {
+            $site_url = isset($site['site_url']) ? (string) $site['site_url'] : '';
+        } elseif (is_scalar($site)) {
+            $site_url = (string) $site;
+        } else {
+            $site_url = '';
+        }
+
+        $site_url = trim($site_url);
+        if ($site_url === '' || isset($seen[$site_url])) {
+            continue;
+        }
+
+        $seen[$site_url] = true;
+        $site_urls[] = $site_url;
+    }
+
+    return $site_urls;
+}
+
+function uptime_monitor_get_site_check_priority_retry_sites($sites = null, $results = null) {
+    if ($sites === null) {
+        $sites = uptime_monitor_get_mainwp_sites();
+    }
+
+    $site_urls = uptime_monitor_normalize_site_url_list($sites);
+    $results = is_array($results) ? $results : get_option('uptime_monitor_results', []);
+    $retry_sites = [];
+
+    foreach ($site_urls as $site_url) {
+        if (uptime_monitor_result_is_down($results[$site_url] ?? [])) {
+            $retry_sites[] = $site_url;
+        }
+    }
+
+    return $retry_sites;
+}
+
 function uptime_monitor_check_status($url, $retry_count = 1, $retry_delay = 0) {
     $retry_count = max(1, (int) $retry_count);
 
@@ -9862,17 +10320,20 @@ function uptime_monitor_get_site_check_batch_size() {
 }
 
 function uptime_monitor_perform_site_check_batch($batch_size = null) {
-    $sites = uptime_monitor_get_mainwp_sites();
-    $sites = array_values(array_unique(array_filter(array_map('strval', $sites), 'strlen')));
+    $sites = uptime_monitor_normalize_site_url_list(uptime_monitor_get_mainwp_sites());
     $site_count = count($sites);
 
     if ($site_count === 0) {
         update_option('uptime_monitor_site_check_last_run', current_time('timestamp'));
         update_option('uptime_monitor_site_check_last_batch_count', 0);
+        update_option('uptime_monitor_site_check_last_priority_count', 0);
+        update_option('uptime_monitor_site_check_priority_cursor', 0);
         update_option('uptime_monitor_site_check_last_error', 'No MainWP child sites were found.');
         return [
-            'checked' => 0,
-            'failed'  => [],
+            'checked'          => 0,
+            'priority_checked' => 0,
+            'failed'           => [],
+            'new_failed'       => [],
         ];
     }
 
@@ -9883,41 +10344,103 @@ function uptime_monitor_perform_site_check_batch($batch_size = null) {
         $cursor = 0;
     }
 
-    $failed_sites = [];
-    $checked = 0;
+    $previous_results = get_option('uptime_monitor_results', []);
+    $previous_results = is_array($previous_results) ? $previous_results : [];
+    $priority_sites = uptime_monitor_get_site_check_priority_retry_sites($sites, $previous_results);
+    $priority_count = count($priority_sites);
+    $priority_cursor = absint(get_option('uptime_monitor_site_check_priority_cursor', 0));
+    if ($priority_cursor >= $priority_count) {
+        $priority_cursor = 0;
+    }
+    $queue = [];
+    $queued_sites = [];
+
+    for ($i = 0; $i < $priority_count && count($queue) < $batch_size; $i++) {
+        $priority_index = ($priority_cursor + $i) % $priority_count;
+        $site = $priority_sites[$priority_index];
+        if (count($queue) >= $batch_size) {
+            break;
+        }
+
+        $queue[] = [
+            'site'     => $site,
+            'priority' => true,
+        ];
+        $queued_sites[$site] = true;
+    }
+
     $next_cursor = $cursor;
+
+    for ($i = 0; $i < $site_count && count($queue) < $batch_size; $i++) {
+        $index = ($cursor + $i) % $site_count;
+        $site = $sites[$index];
+        if (isset($queued_sites[$site])) {
+            continue;
+        }
+
+        $queue[] = [
+            'site'     => $site,
+            'priority' => false,
+            'index'    => $index,
+        ];
+        $queued_sites[$site] = true;
+    }
+
+    $failed_sites = [];
+    $new_failed_sites = [];
+    $checked = 0;
+    $priority_checked = 0;
     $started = microtime(true);
     $max_runtime = (float) apply_filters('uptime_monitor_site_check_batch_max_runtime', 45.0);
 
-    for ($i = 0; $i < $site_count && $checked < $batch_size; $i++) {
-        $index = ($cursor + $i) % $site_count;
-        $site = $sites[$index];
+    foreach ($queue as $entry) {
+        $site = isset($entry['site']) ? (string) $entry['site'] : '';
+        if ($site === '') {
+            continue;
+        }
+
+        $was_down = uptime_monitor_result_is_down($previous_results[$site] ?? []);
         $result = uptime_monitor_perform_check($site);
 
-        if (strpos($result['status'], 'Error') !== false || $result['keyword_match'] === 'No match found') {
-            $failed_sites[$site] = $result['status'] . ' - ' . $result['keyword_match'];
+        if (uptime_monitor_result_is_down($result)) {
+            $status = isset($result['status']) ? (string) $result['status'] : 'Unknown status';
+            $keyword_match = isset($result['keyword_match']) ? (string) $result['keyword_match'] : 'N/A';
+            $failed_sites[$site] = $status . ' - ' . $keyword_match;
+            if (!$was_down) {
+                $new_failed_sites[$site] = $failed_sites[$site];
+            }
         }
 
         $checked++;
-        $next_cursor = ($index + 1) % $site_count;
+        if (!empty($entry['priority'])) {
+            $priority_checked++;
+        } elseif (isset($entry['index'])) {
+            $next_cursor = ((int) $entry['index'] + 1) % $site_count;
+        }
 
         if ($checked >= 1 && (microtime(true) - $started) >= $max_runtime) {
             break;
         }
     }
 
+    $next_priority_cursor = $priority_count > 0 ? (($priority_cursor + $priority_checked) % $priority_count) : 0;
+
     update_option('uptime_monitor_site_check_cursor', $next_cursor);
+    update_option('uptime_monitor_site_check_priority_cursor', $next_priority_cursor);
     update_option('uptime_monitor_site_check_last_run', current_time('timestamp'));
     update_option('uptime_monitor_site_check_last_batch_count', $checked);
+    update_option('uptime_monitor_site_check_last_priority_count', $priority_checked);
     update_option('uptime_monitor_site_check_last_error', '');
 
-    if (!empty($failed_sites)) {
-        uptime_monitor_send_notification($failed_sites);
+    if (!empty($new_failed_sites)) {
+        uptime_monitor_send_notification($new_failed_sites);
     }
 
     return [
-        'checked' => $checked,
-        'failed'  => $failed_sites,
+        'checked'          => $checked,
+        'priority_checked' => $priority_checked,
+        'failed'           => $failed_sites,
+        'new_failed'       => $new_failed_sites,
     ];
 }
 
@@ -9942,10 +10465,11 @@ function uptime_monitor_maybe_run_due_site_check_batch($force = false) {
     $overdue_by = ($next_batch && (int) $next_batch <= time()) ? max(0, time() - (int) $next_batch) : 0;
     if (!$force && $next_batch && (int) $next_batch > time()) {
         return [
-            'ran'        => false,
-            'reason'     => 'not_due',
-            'checked'    => 0,
-            'overdue_by' => 0,
+            'ran'              => false,
+            'reason'           => 'not_due',
+            'checked'          => 0,
+            'priority_checked' => 0,
+            'overdue_by'       => 0,
         ];
     }
 
@@ -9963,10 +10487,11 @@ function uptime_monitor_maybe_run_due_site_check_batch($force = false) {
             $lock_cleared = true;
         } else {
             return [
-                'ran'        => false,
-                'reason'     => 'locked',
-                'checked'    => 0,
-                'overdue_by' => $overdue_by,
+                'ran'              => false,
+                'reason'           => 'locked',
+                'checked'          => 0,
+                'priority_checked' => 0,
+                'overdue_by'       => $overdue_by,
             ];
         }
     }
@@ -9983,11 +10508,12 @@ function uptime_monitor_maybe_run_due_site_check_batch($force = false) {
     uptime_monitor_schedule_next_hourly_check();
 
     return [
-        'ran'          => true,
-        'reason'       => 'due',
-        'checked'      => isset($result['checked']) ? (int) $result['checked'] : 0,
-        'overdue_by'   => $overdue_by,
-        'lock_cleared' => $lock_cleared,
+        'ran'              => true,
+        'reason'           => 'due',
+        'checked'          => isset($result['checked']) ? (int) $result['checked'] : 0,
+        'priority_checked' => isset($result['priority_checked']) ? (int) $result['priority_checked'] : 0,
+        'overdue_by'       => $overdue_by,
+        'lock_cleared'     => $lock_cleared,
     ];
 }
 
@@ -10004,6 +10530,7 @@ function uptime_monitor_ajax_run_due_site_check_batch() {
         'ran'          => !empty($run_result['ran']),
         'reason'       => isset($run_result['reason']) ? (string) $run_result['reason'] : '',
         'checked'      => isset($run_result['checked']) ? (int) $run_result['checked'] : 0,
+        'priority_checked' => isset($run_result['priority_checked']) ? (int) $run_result['priority_checked'] : 0,
         'overdue_by'   => isset($run_result['overdue_by']) ? absint($run_result['overdue_by']) : 0,
         'lock_cleared' => !empty($run_result['lock_cleared']),
     ]);
@@ -10019,6 +10546,7 @@ function uptime_monitor_ajax_run_due_site_check_batch() {
         'ran'     => !empty($run_result['ran']),
         'reason'  => isset($run_result['reason']) ? (string) $run_result['reason'] : '',
         'checked' => isset($run_result['checked']) ? (int) $run_result['checked'] : 0,
+        'priority_checked' => isset($run_result['priority_checked']) ? (int) $run_result['priority_checked'] : 0,
         'overdue_by' => isset($run_result['overdue_by']) ? absint($run_result['overdue_by']) : 0,
         'lock_cleared' => !empty($run_result['lock_cleared']),
     ]);
