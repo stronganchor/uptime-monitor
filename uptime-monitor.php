@@ -3,7 +3,7 @@
 Plugin Name: Uptime Monitor
 Plugin URI: https://github.com/stronganchor/uptime-monitor/
 Description: A plugin to monitor URLs and report their HTTP status and display server stats.
-Version: 1.1.40
+Version: 1.1.41
 Update URI: https://github.com/stronganchor/uptime-monitor
 Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
@@ -2754,8 +2754,8 @@ function uptime_monitor_whm_api_request($whm_user, $whm_api_token, $server_url, 
     $url = rtrim((string) $server_url, '/') . '/' . ltrim((string) $path, '/');
 
     $curl = curl_init();
-    curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, 0); // For development; consider enabling in production
-    curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, 0); // For development; consider enabling in production
+    curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, 2);
+    curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, 1);
     curl_setopt($curl, CURLOPT_RETURNTRANSFER, 1);
     curl_setopt($curl, CURLOPT_HTTPHEADER, ['Authorization: whm ' . $whm_user . ':' . $whm_api_token]);
     curl_setopt($curl, CURLOPT_URL, $url);
@@ -6948,8 +6948,8 @@ function get_whm_account_list($whm_user, $whm_api_token, $server_url) {
     $query = $server_url . '/json-api/listaccts?api.version=1';
 
     $curl = curl_init();
-    curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, 0); // For development; consider enabling in production
-    curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, 0); // For development; consider enabling in production
+    curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, 2);
+    curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, 1);
     curl_setopt($curl, CURLOPT_RETURNTRANSFER, 1);
     curl_setopt($curl, CURLOPT_HTTPHEADER, ['Authorization: whm ' . $whm_user . ':' . $whm_api_token]);
     curl_setopt($curl, CURLOPT_URL, $query);
@@ -6979,8 +6979,8 @@ function get_whm_account_bandwidth_usage($whm_user, $whm_api_token, $server_url)
     $query = rtrim($server_url, '/') . '/json-api/showbw?api.version=1';
 
     $curl = curl_init();
-    curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, 0); // For development; consider enabling in production
-    curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, 0); // For development; consider enabling in production
+    curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, 2);
+    curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, 1);
     curl_setopt($curl, CURLOPT_RETURNTRANSFER, 1);
     curl_setopt($curl, CURLOPT_HTTPHEADER, ['Authorization: whm ' . $whm_user . ':' . $whm_api_token]);
     curl_setopt($curl, CURLOPT_URL, $query);
@@ -7059,8 +7059,8 @@ function get_whm_account_bandwidth_usage_showres($whm_user, $whm_api_token, $ser
     $query = rtrim($server_url, '/') . '/json-api/showres?api.version=1';
 
     $curl = curl_init();
-    curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, 0); // For development; consider enabling in production
-    curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, 0); // For development; consider enabling in production
+    curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, 2);
+    curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, 1);
     curl_setopt($curl, CURLOPT_RETURNTRANSFER, 1);
     curl_setopt($curl, CURLOPT_HTTPHEADER, ['Authorization: whm ' . $whm_user . ':' . $whm_api_token]);
     curl_setopt($curl, CURLOPT_URL, $query);
@@ -7191,8 +7191,8 @@ function get_whm_account_inode_usage($whm_user, $whm_api_token, $server_url) {
     $query = rtrim($server_url, '/') . '/json-api/get_disk_usage?api.version=1&cache_mode=on';
 
     $curl = curl_init();
-    curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, 0); // For development; consider enabling in production
-    curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, 0); // For development; consider enabling in production
+    curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, 2);
+    curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, 1);
     curl_setopt($curl, CURLOPT_RETURNTRANSFER, 1);
     curl_setopt($curl, CURLOPT_HTTPHEADER, ['Authorization: whm ' . $whm_user . ':' . $whm_api_token]);
     curl_setopt($curl, CURLOPT_URL, $query);
@@ -7250,8 +7250,8 @@ function get_whm_load_average($whm_user, $whm_api_token, $server_url) {
     $query = rtrim($server_url, '/') . '/json-api/systemloadavg?api.version=1';
 
     $curl = curl_init();
-    curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, 0); // For development; consider enabling in production
-    curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, 0); // For development; consider enabling in production
+    curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, 2);
+    curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, 1);
     curl_setopt($curl, CURLOPT_RETURNTRANSFER, 1);
     curl_setopt($curl, CURLOPT_HTTPHEADER, ['Authorization: whm ' . $whm_user . ':' . $whm_api_token]);
     curl_setopt($curl, CURLOPT_URL, $query);
