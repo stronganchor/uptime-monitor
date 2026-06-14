@@ -3,7 +3,7 @@
 Plugin Name: Uptime Monitor
 Plugin URI: https://github.com/stronganchor/uptime-monitor/
 Description: A plugin to monitor URLs and report their HTTP status and display server stats.
-Version: 1.1.41
+Version: 1.1.42
 Update URI: https://github.com/stronganchor/uptime-monitor
 Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
@@ -6236,6 +6236,115 @@ function uptime_monitor_format_server_health_php_fpm_pools($pools) {
     return empty($parts) ? 'not reported' : implode('; ', $parts);
 }
 
+function uptime_monitor_server_health_first_scalar($row, $keys) {
+    if (!is_array($row) || !is_array($keys)) {
+        return '';
+    }
+
+    foreach ($keys as $key) {
+        if (!is_scalar($key) || !isset($row[$key]) || !is_scalar($row[$key])) {
+            continue;
+        }
+
+        $value = uptime_monitor_report_clean_text($row[$key]);
+        if ($value !== '') {
+            return $value;
+        }
+    }
+
+    return '';
+}
+
+function uptime_monitor_format_server_health_count_rows($rows, $label_keys, $limit = 4) {
+    if (!is_array($rows) || empty($rows)) {
+        return 'not reported';
+    }
+
+    $parts = [];
+    foreach ($rows as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+
+        $label = uptime_monitor_server_health_first_scalar($row, $label_keys);
+        if ($label === '') {
+            continue;
+        }
+
+        $count = isset($row['count']) && is_numeric($row['count']) ? (int) $row['count'] : null;
+        $parts[] = $count === null ? $label : $label . ': ' . $count;
+        if (count($parts) >= $limit) {
+            break;
+        }
+    }
+
+    return empty($parts) ? 'not reported' : implode('; ', $parts);
+}
+
+function uptime_monitor_format_server_health_access_logs($rows, $limit = 3) {
+    if (!is_array($rows) || empty($rows)) {
+        return 'not reported';
+    }
+
+    $parts = [];
+    foreach ($rows as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+
+        $label = uptime_monitor_server_health_first_scalar($row, ['site', 'log']);
+        if ($label === '') {
+            continue;
+        }
+
+        $requests = isset($row['request_count']) && is_numeric($row['request_count']) ? (int) $row['request_count'] : 0;
+        $dynamic = isset($row['dynamic_request_count']) && is_numeric($row['dynamic_request_count']) ? (int) $row['dynamic_request_count'] : 0;
+        $crawlers = isset($row['crawler_request_count']) && is_numeric($row['crawler_request_count']) ? (int) $row['crawler_request_count'] : 0;
+        $endpoints = uptime_monitor_format_server_health_count_rows($row['top_endpoint_classes'] ?? [], ['endpoint_class'], 2);
+
+        $parts[] = $label . ' ' . $requests . ' req, ' . $dynamic . ' dynamic, ' . $crawlers . ' crawler; ' . $endpoints;
+        if (count($parts) >= $limit) {
+            break;
+        }
+    }
+
+    return empty($parts) ? 'not reported' : implode(' | ', $parts);
+}
+
+function uptime_monitor_format_server_health_pressure_pools($rows, $limit = 3) {
+    if (!is_array($rows) || empty($rows)) {
+        return 'not reported';
+    }
+
+    $parts = [];
+    foreach ($rows as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+
+        $pool = uptime_monitor_server_health_first_scalar($row, ['pool']);
+        if ($pool === '') {
+            continue;
+        }
+
+        $workers = isset($row['workers']) && is_numeric($row['workers']) ? (int) $row['workers'] : null;
+        $max_children = isset($row['max_children']) && is_numeric($row['max_children']) ? (int) $row['max_children'] : null;
+        $recent = isset($row['recent_max_children']) && is_numeric($row['recent_max_children']) ? (int) $row['recent_max_children'] : 0;
+        $worker_text = $workers === null ? '?' : (string) $workers;
+        if ($max_children !== null && $max_children > 0) {
+            $worker_text .= '/' . $max_children;
+        }
+
+        $logs = uptime_monitor_format_server_health_access_logs($row['probable_access_logs'] ?? [], 1);
+        $parts[] = $pool . ' ' . $worker_text . ', recent max_children ' . $recent . ', ' . $logs;
+        if (count($parts) >= $limit) {
+            break;
+        }
+    }
+
+    return empty($parts) ? 'not reported' : implode(' | ', $parts);
+}
+
 function uptime_monitor_report_clean_text($value) {
     if (is_array($value) || is_object($value)) {
         return '';
@@ -6505,6 +6614,9 @@ function uptime_monitor_build_server_health_copy_text($health) {
     $php_fpm_workers = uptime_monitor_get_array_path($report, ['php_fpm', 'total_workers'], null);
     $php_fpm_pools = uptime_monitor_format_server_health_php_fpm_pools(uptime_monitor_get_array_path($report, ['php_fpm', 'pools'], []));
     $php_fpm_errors = uptime_monitor_format_server_health_counts(uptime_monitor_get_array_path($report, ['php_fpm', 'errors', 'counts'], []));
+    $access_endpoint_classes = uptime_monitor_format_server_health_count_rows(uptime_monitor_get_array_path($report, ['attribution', 'hot_endpoint_classes'], []), ['endpoint_class'], 4);
+    $access_hot_logs = uptime_monitor_format_server_health_access_logs(uptime_monitor_get_array_path($report, ['attribution', 'hot_access_logs'], []), 3);
+    $pressure_attribution = uptime_monitor_format_server_health_pressure_pools(uptime_monitor_get_array_path($report, ['attribution', 'pressure_pools'], []), 3);
 
     $lines[] = '5m load: ' . ($load_five === null ? 'unknown' : $load_five) . ($load_per_core === null ? '' : ' (' . $load_per_core . '/core)');
     $lines[] = 'Memory available: ' . ($memory_available_pct === null ? 'unknown' : $memory_available_pct . '%');
@@ -6514,6 +6626,9 @@ function uptime_monitor_build_server_health_copy_text($health) {
     $lines[] = 'CSF temp blocks: ' . ($csf_blocks === null ? 'unknown' : $csf_blocks);
     $lines[] = 'PHP-FPM workers: ' . ($php_fpm_workers === null ? 'unknown' : $php_fpm_workers) . ' (' . $php_fpm_pools . ')';
     $lines[] = 'PHP-FPM recent errors: ' . $php_fpm_errors;
+    $lines[] = 'Access endpoint classes: ' . $access_endpoint_classes;
+    $lines[] = 'Hot access logs: ' . $access_hot_logs;
+    $lines[] = 'Pressure attribution: ' . $pressure_attribution;
 
     return implode("\n", $lines);
 }
@@ -6585,6 +6700,9 @@ function uptime_monitor_render_server_health_report($health) {
     $php_fpm_workers = uptime_monitor_get_array_path($report, ['php_fpm', 'total_workers'], null);
     $php_fpm_pools = uptime_monitor_format_server_health_php_fpm_pools(uptime_monitor_get_array_path($report, ['php_fpm', 'pools'], []));
     $php_fpm_errors = uptime_monitor_format_server_health_counts(uptime_monitor_get_array_path($report, ['php_fpm', 'errors', 'counts'], []));
+    $access_endpoint_classes = uptime_monitor_format_server_health_count_rows(uptime_monitor_get_array_path($report, ['attribution', 'hot_endpoint_classes'], []), ['endpoint_class'], 4);
+    $access_hot_logs = uptime_monitor_format_server_health_access_logs(uptime_monitor_get_array_path($report, ['attribution', 'hot_access_logs'], []), 3);
+    $pressure_attribution = uptime_monitor_format_server_health_pressure_pools(uptime_monitor_get_array_path($report, ['attribution', 'pressure_pools'], []), 3);
     $reasons = is_array($status) && isset($status['reasons']) && is_array($status['reasons']) ? $status['reasons'] : [];
 
     echo '<div class="uptime-monitor-server-health-summary">';
@@ -6612,6 +6730,9 @@ function uptime_monitor_render_server_health_report($health) {
     echo '<div><span>CSF temp blocks</span><strong>' . esc_html($csf_blocks === null ? 'unknown' : $csf_blocks) . '</strong></div>';
     echo '<div><span>PHP-FPM workers</span><strong>' . esc_html($php_fpm_workers === null ? 'unknown' : $php_fpm_workers) . '</strong><small>' . esc_html($php_fpm_pools) . '</small></div>';
     echo '<div><span>PHP-FPM recent errors</span><strong>' . esc_html($php_fpm_errors) . '</strong></div>';
+    echo '<div><span>Access endpoint classes</span><strong>' . esc_html($access_endpoint_classes) . '</strong></div>';
+    echo '<div><span>Hot access logs</span><strong>' . esc_html($access_hot_logs) . '</strong></div>';
+    echo '<div><span>Pressure attribution</span><strong>' . esc_html($pressure_attribution) . '</strong></div>';
     echo '</div>';
 
     echo '</div>';
