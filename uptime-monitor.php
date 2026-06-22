@@ -3,7 +3,7 @@
 Plugin Name: Uptime Monitor
 Plugin URI: https://github.com/stronganchor/uptime-monitor/
 Description: A plugin to monitor URLs and report their HTTP status and display server stats.
-Version: 1.1.42
+Version: 1.1.43
 Update URI: https://github.com/stronganchor/uptime-monitor
 Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
@@ -6200,6 +6200,10 @@ function uptime_monitor_format_server_health_backlog($listen_rows) {
     return empty($parts) ? 'not reported' : implode(', ', $parts);
 }
 
+function uptime_monitor_server_health_socket_help_text() {
+    return 'Counts local HTTP/HTTPS TCP sockets from ss -tan, including states like TIME-WAIT and ESTAB; this is not a WebSocket upgrade/session count.';
+}
+
 function uptime_monitor_format_server_health_php_fpm_pools($pools) {
     if (!is_array($pools) || empty($pools)) {
         return 'not reported';
@@ -6607,7 +6611,8 @@ function uptime_monitor_build_server_health_copy_text($health) {
     $load_five = uptime_monitor_get_array_path($report, ['metrics', 'load', 'five'], null);
     $load_per_core = uptime_monitor_get_array_path($report, ['metrics', 'load', 'five_per_core'], null);
     $memory_available_pct = uptime_monitor_get_array_path($report, ['metrics', 'memory', 'available_pct'], null);
-    $web_sockets = uptime_monitor_get_array_path($report, ['apache', 'sockets', 'total_active'], null);
+    $http_socket_total = uptime_monitor_get_array_path($report, ['apache', 'sockets', 'total_active'], null);
+    $http_socket_states = uptime_monitor_format_server_health_counts(uptime_monitor_get_array_path($report, ['apache', 'sockets', 'states'], []));
     $backlog = uptime_monitor_format_server_health_backlog(uptime_monitor_get_array_path($report, ['apache', 'sockets', 'listen'], []));
     $saturation_counts = uptime_monitor_format_server_health_counts(uptime_monitor_get_array_path($report, ['apache', 'errors', 'saturation_counts'], []));
     $csf_blocks = uptime_monitor_get_array_path($report, ['firewall', 'csf', 'count'], null);
@@ -6621,7 +6626,9 @@ function uptime_monitor_build_server_health_copy_text($health) {
     $lines[] = '5m load: ' . ($load_five === null ? 'unknown' : $load_five) . ($load_per_core === null ? '' : ' (' . $load_per_core . '/core)');
     $lines[] = 'Memory available: ' . ($memory_available_pct === null ? 'unknown' : $memory_available_pct . '%');
     $lines[] = 'Listen backlog: ' . $backlog;
-    $lines[] = 'Active web sockets: ' . ($web_sockets === null ? 'unknown' : $web_sockets);
+    $lines[] = '80/443 TCP sockets: ' . ($http_socket_total === null ? 'unknown' : $http_socket_total);
+    $lines[] = '80/443 TCP socket states: ' . $http_socket_states;
+    $lines[] = 'Socket note: ' . uptime_monitor_server_health_socket_help_text();
     $lines[] = 'Apache saturation errors: ' . $saturation_counts;
     $lines[] = 'CSF temp blocks: ' . ($csf_blocks === null ? 'unknown' : $csf_blocks);
     $lines[] = 'PHP-FPM workers: ' . ($php_fpm_workers === null ? 'unknown' : $php_fpm_workers) . ' (' . $php_fpm_pools . ')';
@@ -6693,7 +6700,8 @@ function uptime_monitor_render_server_health_report($health) {
     $load_five = uptime_monitor_get_array_path($report, ['metrics', 'load', 'five'], null);
     $load_per_core = uptime_monitor_get_array_path($report, ['metrics', 'load', 'five_per_core'], null);
     $memory_available_pct = uptime_monitor_get_array_path($report, ['metrics', 'memory', 'available_pct'], null);
-    $web_sockets = uptime_monitor_get_array_path($report, ['apache', 'sockets', 'total_active'], null);
+    $http_socket_total = uptime_monitor_get_array_path($report, ['apache', 'sockets', 'total_active'], null);
+    $http_socket_states = uptime_monitor_format_server_health_counts(uptime_monitor_get_array_path($report, ['apache', 'sockets', 'states'], []));
     $backlog = uptime_monitor_format_server_health_backlog(uptime_monitor_get_array_path($report, ['apache', 'sockets', 'listen'], []));
     $saturation_counts = uptime_monitor_format_server_health_counts(uptime_monitor_get_array_path($report, ['apache', 'errors', 'saturation_counts'], []));
     $csf_blocks = uptime_monitor_get_array_path($report, ['firewall', 'csf', 'count'], null);
@@ -6725,7 +6733,7 @@ function uptime_monitor_render_server_health_report($health) {
     echo '<div><span>5m load</span><strong>' . esc_html($load_five === null ? 'unknown' : $load_five) . '</strong><small>' . esc_html($load_per_core === null ? '' : $load_per_core . '/core') . '</small></div>';
     echo '<div><span>Memory available</span><strong>' . esc_html($memory_available_pct === null ? 'unknown' : $memory_available_pct . '%') . '</strong></div>';
     echo '<div><span>Listen backlog</span><strong>' . esc_html($backlog) . '</strong></div>';
-    echo '<div><span>Active web sockets</span><strong>' . esc_html($web_sockets === null ? 'unknown' : $web_sockets) . '</strong></div>';
+    echo '<div><span>80/443 TCP sockets</span><strong>' . esc_html($http_socket_total === null ? 'unknown' : $http_socket_total) . '</strong><small>' . esc_html('States: ' . $http_socket_states . '. ' . uptime_monitor_server_health_socket_help_text()) . '</small></div>';
     echo '<div><span>Apache saturation errors</span><strong>' . esc_html($saturation_counts) . '</strong></div>';
     echo '<div><span>CSF temp blocks</span><strong>' . esc_html($csf_blocks === null ? 'unknown' : $csf_blocks) . '</strong></div>';
     echo '<div><span>PHP-FPM workers</span><strong>' . esc_html($php_fpm_workers === null ? 'unknown' : $php_fpm_workers) . '</strong><small>' . esc_html($php_fpm_pools) . '</small></div>';
