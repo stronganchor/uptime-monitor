@@ -3,7 +3,7 @@
 Plugin Name: Uptime Monitor
 Plugin URI: https://github.com/stronganchor/uptime-monitor/
 Description: A plugin to monitor URLs and report their HTTP status and display server stats.
-Version: 1.1.43
+Version: 1.1.44
 Update URI: https://github.com/stronganchor/uptime-monitor
 Author: Strong Anchor Tech
 Author URI: https://stronganchortech.com/
@@ -2625,11 +2625,16 @@ function uptime_monitor_settings_page() {
 
         // WHM settings
         $whm_user       = isset($_POST['whm_user']) ? sanitize_text_field(wp_unslash($_POST['whm_user'])) : '';
-        $whm_api_token  = isset($_POST['whm_api_token']) ? sanitize_text_field(wp_unslash($_POST['whm_api_token'])) : '';
+        $whm_api_token  = isset($_POST['whm_api_token']) ? trim(sanitize_text_field(wp_unslash($_POST['whm_api_token']))) : '';
+        $clear_whm_api_token = !empty($_POST['whm_api_token_clear']);
         $whm_server_url = isset($_POST['whm_server_url']) ? sanitize_text_field(wp_unslash($_POST['whm_server_url'])) : '';
 
         update_option('uptime_monitor_whm_user', $whm_user);
-        update_option('uptime_monitor_whm_api_token', $whm_api_token);
+        if ($clear_whm_api_token) {
+            delete_option('uptime_monitor_whm_api_token');
+        } elseif ($whm_api_token !== '') {
+            update_option('uptime_monitor_whm_api_token', $whm_api_token);
+        }
         update_option('uptime_monitor_whm_server_url', $whm_server_url);
 
         // MainWP From Email override
@@ -2659,6 +2664,7 @@ function uptime_monitor_settings_page() {
     $whm_api_token     = get_option('uptime_monitor_whm_api_token', '');
     $whm_server_url    = get_option('uptime_monitor_whm_server_url', '');
     $mainwp_from_email = get_option('uptime_monitor_mainwp_from_email', '');
+    $whm_api_token_set = trim((string) $whm_api_token) !== '';
     $server_health_report_url = get_option('uptime_monitor_server_health_report_url', '');
     $server_health_report_auth_header = trim((string) get_option('uptime_monitor_server_health_report_auth_header', ''));
     $server_health_report_auth_header_set = $server_health_report_auth_header !== '';
@@ -2680,7 +2686,13 @@ function uptime_monitor_settings_page() {
 
     echo '<tr>';
     echo '<th scope="row"><label for="whm_api_token">WHM API Token</label></th>';
-    echo '<td><input type="text" id="whm_api_token" name="whm_api_token" value="' . esc_attr($whm_api_token) . '" class="regular-text"></td>';
+    echo '<td>';
+    echo '<input type="password" id="whm_api_token" name="whm_api_token" value="" class="regular-text" autocomplete="new-password" placeholder="Enter a new WHM API token">';
+    echo '<p class="description">Leave blank to keep the saved token. Current status: ' . esc_html($whm_api_token_set ? 'saved' : 'not saved') . '.</p>';
+    if ($whm_api_token_set) {
+        echo '<label><input type="checkbox" name="whm_api_token_clear" value="1"> Clear saved WHM API token</label>';
+    }
+    echo '</td>';
     echo '</tr>';
 
     echo '<tr>';
